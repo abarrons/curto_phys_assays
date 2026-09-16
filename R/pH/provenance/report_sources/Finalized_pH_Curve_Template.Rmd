@@ -1,0 +1,193 @@
+---
+title: "ID/pH Table Output"
+author: "BLu12"
+date: "2022-09-12"
+output: html_document
+---
+
+README: This markdown file is meant to do the bulk of the work for the assessment of optimal pH for growth of the strain. 
+```{r Set working directory and load pakcages}
+
+#set working directory
+# working directory handled by here::here()
+
+library(growthcurver) #Make sure to note this was just added for the knitted file
+library(MASS) 
+library(reshape2) 
+library(reshape) 
+```
+
+
+```{r Load first data table}
+#TODO: Primary information to be entered by the user. Time increment will be in minutes.
+time_increment <-15 
+total_hours <-48
+
+#Assign strain IDs in the same order as in the plate (by columns)
+S1ID <- "25G2A02"
+S2ID <- "35G2B04"
+S3ID <- "28D03"
+
+#Read in data, and replace the time column with a new time column
+data <- read.csv(file=here::here("data-raw/pH/pHassay_022723.csv"), header = TRUE)
+
+#Initial Stuff ----
+
+data <- data[c(-2)]
+tminutes <- (total_hours*60/time_increment) + 1
+data$Time <- (1:tminutes)*time_increment
+
+#Getting the data from the plate and employing growthcurver for analysis
+summary_plate <- SummarizeGrowthByPlate(plate = data)
+
+#Creating the list for the pHs to match that of the wells
+pH_list <- list()
+for(i in 0:7){
+  pH_list[3*i + 1] <- 3.2 + 0.3*i
+  pH_list[3*i + 2] <- 5.6 + 0.3*i
+  pH_list[3*i + 3] <- 8.0 + 0.3*i
+}
+
+#Initializing variables that will be used to create the lists of growth rates for each strain ----
+s1count <- 1
+s2count <- 1
+s3count <- 1
+strain1_g_list <- list()
+strain2_g_list <- list()
+strain3_g_list <- list()
+
+#Modifies the growth rate lists so that they have the growth rates in them ----
+for(i in 1:96){
+  
+  if(substring(summary_plate$sample[i], 2, nchar(summary_plate$sample[i])) %in% c(1,2,3)){
+    strain1_g_list[s1count] <- summary_plate$r[i]
+    s1count <- s1count + 1 
+  }
+  
+  else if(substring(summary_plate$sample[i], 2, nchar(summary_plate$sample[i])) %in% c(4,5,6)){
+    strain2_g_list[s2count] <- summary_plate$r[i]
+    s2count <- s2count + 1 
+    }
+  
+  else if(substring(summary_plate$sample[i], 2, nchar(summary_plate$sample[i])) %in% c(10,11,12)){
+    strain3_g_list[s3count] <- summary_plate$r[i]
+    s3count <- s3count + 1 
+  }
+  
+}
+
+#Plots the growth rates in accordance with the respective pH. ----
+plot(pH_list, strain1_g_list, ylab = "Growth Rate", xlab = "pH", main = S1ID)
+plot(pH_list, strain2_g_list, ylab = "Growth Rate", xlab = "pH", main = S2ID)
+plot(pH_list, strain3_g_list, ylab = "Growth Rate", xlab = "pH", main = S3ID)
+
+#Section on Creating the New Tables ----
+
+#Creation of the new table that will just have Strain ID, pH, and Growth Rate
+colnames <- seq(1, 24, 1)
+rownames <- list("Strain", "pH", "Growth_Rate")
+
+#Creation of the Growth Rate Table for Strain 1 ----
+s1g_table <- matrix(c(rep(S1ID, 24), pH_list, strain1_g_list), byrow = TRUE,nrow = 3,ncol = 24 ,dimnames = list(rownames, colnames))
+
+#Continuous transformations of the table to turn them into data frames so that they can easily be manipulated
+fin1 <- as.data.frame(t(as.data.frame(s1g_table)))
+newfin1 <- transform(fin1, pH = as.numeric(pH), Strain = as.character(Strain), Growth_Rate = as.numeric(Growth_Rate))
+melt_data1 <- melt(newfin1, id=c("Strain", "pH"))
+table_sorted1 <- melt_data1[order(melt_data1$Strain, melt_data1$pH),]
+#table_sorted1 is the final table for Strain 3, to view it, undo the comment out of the following line
+#table_sorted1
+
+#Creation of the Growth Rate Table for Strain 2 ----
+s2g_table <- matrix(c(rep(S2ID, 24), pH_list, strain2_g_list), byrow = TRUE,nrow = 3,ncol = 24 ,dimnames = list(rownames, colnames))
+
+#Continuous transformations of the table to turn them into data frames so that they can easily be manipulated
+fin2 <- as.data.frame(t(as.data.frame(s2g_table)))
+newfin2 <- transform(fin2, pH = as.numeric(pH), Strain = as.character(Strain), Growth_Rate = as.numeric(Growth_Rate))
+melt_data2 <- melt(newfin2, id=c("Strain", "pH"))
+table_sorted2 <- melt_data2[order(melt_data2$Strain, melt_data2$pH),]
+#table_sorted2 is the final table for Strain 3, to view it, undo the comment out of the following line
+#table_sorted2
+
+#Creation of the Growth Rate Table for Strain 3 ----
+s3g_table <- matrix(c(rep(S3ID, 24), pH_list, strain3_g_list), byrow = TRUE,nrow = 3,ncol = 24 ,dimnames = list(rownames, colnames))
+
+#Continuous transformations of the table to turn them into data frames so that they can easily be manipulated
+fin3 <- as.data.frame(t(as.data.frame(s3g_table)))
+newfin3 <- transform(fin3, pH = as.numeric(pH), Strain = as.character(Strain), Growth_Rate = as.numeric(Growth_Rate))
+melt_data3 <- melt(newfin3, id=c("Strain", "pH"))
+table_sorted3 <- melt_data3[order(melt_data3$Strain, melt_data3$pH),]
+#table_sorted3 is the final table for Strain 3, to view it, undo the comment out of the following line
+#table_sorted3
+```
+
+
+```{r}
+#CSV File Export **User Input Needed** ----
+
+#Bringing all the dataframes together and taking out the variable column and putting it as the title of the value column
+total2 <- rbind(table_sorted1, table_sorted2, table_sorted3)
+names(total2)[names(total2)=="value"] <- "Growth_Rate"
+total2 <- total2[c(1,2,4)]
+#To look at the dataframe, undo the comment out of the following line
+#total
+```
+
+The function of this block of code is to create a csv file with just the data from the plate that was done. It also adds that data into a larger csv file that intends to have all the data aggregated into one big file.
+```{r}
+#Outputting into its own CSV File
+write.csv(total,"pH_assay_growth_rates_G32-W2-P43_20221021.csv", row.names = FALSE)
+
+#Outputting into the main CSV File
+data2 <- read.csv(file=here::here("data-raw/pH/pH_assay_growth_rates_G32-W2-P43_20221021.csv"), header = TRUE)
+total2 <- rbind(data2, total)
+write.csv(total2,"pH_assay_growth_rates_G32-W2-P43_20221021-2.csv", row.names = FALSE)
+```
+
+The function of this block of code is to take in the data from the big csv file and graph the pH vs growth rate curves. This one will aim to have the average growth rate on the y-axis, and also have the error bars for them. 
+```{r}
+
+#data3 <- read.csv(file='pH_assay_growth_rates_G32-W2-P43_20221021-2.csv', header = TRUE)
+#data3<-rbind(total, total2)
+data3<-rbind(data3, total2)
+#Sorts the data with Strain and pH as the main things that are accounted for
+melt_data <- melt(data3, id = c("Strain", "pH"))
+
+#Creates an Strain-pH column, which is meant to help with uniquely identifying each set of strain-pH combinations
+for(i in 1:nrow(melt_data)){
+  melt_data$SPH[i] <- paste(melt_data$Strain[i], "pH", toString(melt_data$pH[i]), sep = "_")
+}
+
+#Creates a new table that has the average growth rate as the value
+average_table <- cast(melt_data, SPH~variable, mean)
+
+#New list for the pH for the average_table that will make it possible to be graphed
+pH_list2 <- list(10.1)
+for(i in 1:23){
+  pH_list2[i+1] <- 2.9 + i*0.3
+}
+
+#This counts how many unique strains are listed in the average_table variable
+numstrain <- nrow(average_table)/24
+
+#This plots the graph of each average growth rate vs pH for the strain
+ for(i in 0:(numstrain-1)){
+   plot(pH_list2, average_table[(1 + 24*i):(24 + 24*i),2], ylab = "Growth Rate Mean", xlab = "pH", main = melt_data$Strain[1 + 24*i])
+ }
+
+#This adds a pH column to the average_table for reasons I do not yet know
+average_table$pH <- as.numeric(pH_list2) 
+
+#This does statistics for me!
+ell <- melt_data[order(melt_data$Strain, melt_data$pH),]
+se <- function(x) sd(x)/sqrt(length(x))
+ksenia <- cast(melt_data, SPH~variable, se)
+sen <-unique(unlist(ell[,1], use.names = FALSE))
+#This plots again, with error bars, each error bar's length is that of a single standard deviation from the mean
+for(i in 0:(numstrain-1)){
+  plot(pH_list2, average_table[(1+24*i):(24+24*i),2], ylab = "Approximated Growth Rate Mean", xlab = "pH", main = sen[i+1])  
+  arrows(x0=as.numeric(pH_list2), y0=average_table[(1+24*i):(24+24*i),2] - ksenia[(1+24*i):(24+24*i),2], x1=as.numeric(pH_list2), y1=average_table[(1+24*i):(24+24*i),2]+ ksenia[(1+24*i):(24+24*i),2], code=3, col="blue", lwd=2, angle=90, length = 0.05)
+}
+
+
+```

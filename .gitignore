@@ -1,0 +1,44 @@
+# --- R defaults ---
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj.bak
+
+# --- OS ---
+.DS_Store
+
+# --- Generated outputs (regenerated from data/ by the pipeline) ---
+output/
+
+# --- Raw data (NOT distributed; obtain separately and place under data-raw/) ---
+data-raw/
+
+# Rendered reports / notebooks
+*.html
+
+# Serialized R objects
+*.rds
+
+# knitr / rmarkdown render directories and cache
+*_files/
+*_cache/
+/cache/
+
+# Plots / figures (only ever generated into output/)
+*.png
+*.pdf
+*.svg
+
+# Design & other binary artifacts
+*.ai
+*.pptx
+*.JPG
+*.jpg
+
+# ...but always keep committed documentation and data,
+# even though they may match the patterns above.
+!docs/
+!docs/**
+!data/
+!data/**

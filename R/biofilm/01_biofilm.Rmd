@@ -1,0 +1,320 @@
+---
+title: "Biofilm formation analysis"
+author: "Alberto Barron"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 11
+    fig_height: 7
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r general settings, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
+library(tidyverse)
+library(reshape2)
+library(tuple)
+library(tidyr)
+library(broom)
+library(here)
+
+
+apatheme=theme_bw()+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        text=element_text(family='Arial'))
+
+
+
+```
+
+```{r setup, include=FALSE, echo=FALSE}
+# Output directory (gitignored; created on a fresh clone)
+dir.create(here("output/biofilm"), recursive = TRUE, showWarnings = FALSE)
+
+knitr::opts_knit$set(root.dir = here())
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  cache = F,         # Enable caching for speed
+  #cache.path = here::here("cache/"), # Cache files saved in the "cache" folder
+  fig.path = here("output/biofilm/knit/"),
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 5
+)
+options(scipen=999, digits = 12)
+set.seed(seed = 711)
+```
+
+#### Description
+
+This script will analyse the processed data from the Biofilm assay.
+
+```{r load data, include=FALSE, echo=FALSE}
+
+biofilm <- readxl::read_excel(here("data/biofilm/biofilmassay.xlsx"))
+
+strain_table <- biofilm |>
+  filter(StrainID != "NEG" | !is.na(StrainID)) |>
+  dplyr::select(StrainID) |>
+  distinct(StrainID, .keep_all = T) |>
+  mutate(biofilm = "yes")
+
+write.table(strain_table, file = here("output/biofilm/biofilm_strain_table.txt"),
+            row.names = F,
+            col.names = T,
+            quote = F)
+
+
+strain_table_summary <- biofilm |>
+  filter(StrainID != "NEG" & !is.na(StrainID)) |>
+  group_by(StrainID) |>
+  summarise(avg = mean(index)) |>
+  rename(biofilm_index = avg)
+
+
+write.table(strain_table_summary, file = here("output/biofilm/biofilm_avg_data.txt"),
+            row.names = F,
+            col.names = T,
+            quote = F)
+
+
+## Let's get the metadata info for each strain. For that we need to read in the master metadata table.
+master_md <- read.table(here("data/shared/master_md_all_sequenced_Isolates_with_extendedMD.txt"), header = T, sep = "\t")
+
+master_md <- master_md %>% select(Name, clade, subclade)
+
+
+clade_info <- merge(strain_table_summary, master_md, by.x = "StrainID", by.y = "Name", all.x = T) %>% select(StrainID, clade, subclade) %>% distinct()
+
+
+#now let's match the clade colors to the metadata
+clade_colors <- read.table(here("data/shared/clade_colors.txt"), header = T, sep = "\t", comment.char = "")
+
+clade_col <- clade_info |>
+  select(clade) |>
+  distinct() |>
+  left_join(clade_colors, by = c("clade" = "variable")) |>
+  pull(color, name = clade)
+
+subclade_col <- clade_info |>
+  select(subclade) |>
+  distinct() |>
+  left_join(clade_colors, by = c("subclade" = "variable")) |>
+  pull(color, name = subclade)
+
+
+strain_table_summary <- strain_table_summary |>
+  left_join(clade_info, by = "StrainID")
+
+table(strain_table_summary$clade)
+table(strain_table_summary$subclade)
+
+
+# 2. build the plot
+  plt <- ggplot(strain_table_summary |>
+                  filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                aes(y = biofilm_index,
+                    x = subclade,
+                    colour = subclade)) +
+    geom_jitter(height = 0.15, alpha = 0.35) +
+    stat_summary(fun = mean, geom = "point",
+                 size = 3, shape = 21, fill = "white") +
+    stat_summary(fun.data = mean_cl_boot,
+                 geom     = "errorbar",
+                 width   = 0.2) +
+    #scale_x_discrete(limits = rev) +
+    scale_colour_manual(values = subclade_col, guide = "none") +
+    labs(y = "Biofilm index", x = "Subclade") +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.y      = element_text(face = "bold"),
+      strip.text       = element_text(size = 16),
+      panel.grid.major = element_line(colour = "grey90"),
+      panel.grid.minor = element_blank(),
+      legend.position  = "none"
+    )
+
+plt
+
+
+
+
+rstatix::shapiro_test(strain_table_summary$biofilm_index)
+rstatix::levene_test(biofilm_index ~ subclade, data = strain_table_summary)
+
+omni <- rstatix::kruskal_test(biofilm_index ~ subclade, data = strain_table_summary)
+omni
+
+ph   <- rstatix::dunn_test(biofilm_index ~ subclade, data = strain_table_summary, p.adjust.method = "BH")
+ph
+
+# Use the same filtered data as in the plot
+df <- strain_table_summary |>
+  filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"))
+
+# Re-run Dunn on THIS df (important!)
+ph <- rstatix::dunn_test(biofilm_index ~ subclade, data = df, p.adjust.method = "BH")
+
+# Build a symmetric matrix of adjusted p-values for multcompView
+groups <- sort(unique(df$subclade))
+pmat <- matrix(1, nrow = length(groups), ncol = length(groups),
+               dimnames = list(groups, groups))
+
+ph_mat <- ph |>
+  select(group1, group2, p.adj) |>
+  mutate(group1 = as.character(group1),
+         group2 = as.character(group2))
+
+for (i in seq_len(nrow(ph_mat))) {
+  g1 <- ph_mat$group1[i]; g2 <- ph_mat$group2[i]; p  <- ph_mat$p.adj[i]
+  pmat[g1, g2] <- p
+  pmat[g2, g1] <- p
+}
+
+# Get letters (groups that do NOT differ share a letter)
+letters <- multcompView::multcompLetters(pmat, threshold = 0.05)$Letters
+letters_df <- tibble(subclade = names(letters), letters = unname(letters))
+
+# 2) Position the letters a bit above the data for each subclade
+
+offset <- 0.05 * diff(range(df$biofilm_index, na.rm = TRUE))
+
+label_pos <- df |>
+  dplyr::group_by(subclade) |>
+  dplyr::summarise(y = max(biofilm_index, na.rm = TRUE) + offset, .groups = "drop") |>
+  dplyr::left_join(letters_df, by = "subclade")
+
+# 3) Add to your plot
+plt +
+  geom_text(data = label_pos,
+            aes(x = subclade, y = y, label = letters),
+            fontface = "bold", vjust = 0)
+
+
+ggsave(
+      filename = here("output/biofilm/biofilm_dotplot_TopSubclades.png"),
+      width    = 180,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+### log transformations
+
+strain_table_summary <- strain_table_summary |>
+  mutate(log_biofilm = log(biofilm_index))
+
+
+
+# 2. build the plot
+  plt_log <- ggplot(strain_table_summary |>
+                  filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                aes(y = log_biofilm,
+                    x = subclade,
+                    colour = subclade)) +
+    geom_jitter(height = 0.15, alpha = 0.35) +
+    stat_summary(fun = mean, geom = "point",
+                 size = 3, shape = 21, fill = "white") +
+    stat_summary(fun.data = mean_cl_boot,
+                 geom     = "errorbar",
+                 width   = 0.2) +
+    #scale_x_discrete(limits = rev) +
+    scale_colour_manual(values = subclade_col, guide = "none") +
+    labs(y = "log Biofilm index", x = "Subclade") +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.y      = element_text(face = "bold"),
+      strip.text       = element_text(size = 16),
+      panel.grid.major = element_line(colour = "grey90"),
+      panel.grid.minor = element_blank(),
+      legend.position  = "none"
+    )
+
+plt_log
+
+
+
+
+rstatix::shapiro_test(strain_table_summary$log_biofilm)
+rstatix::levene_test(log_biofilm ~ subclade, data = strain_table_summary)
+
+omni <- rstatix::kruskal_test(log_biofilm ~ subclade, data = strain_table_summary)
+omni
+
+ph   <- rstatix::dunn_test(log_biofilm ~ subclade, data = strain_table_summary, p.adjust.method = "BH")
+ph
+
+# Use the same filtered data as in the plot
+df <- strain_table_summary |>
+  filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"))
+
+# Re-run Dunn on THIS df (important!)
+ph <- rstatix::dunn_test(log_biofilm ~ subclade, data = df, p.adjust.method = "BH")
+
+# Build a symmetric matrix of adjusted p-values for multcompView
+groups <- sort(unique(df$subclade))
+pmat <- matrix(1, nrow = length(groups), ncol = length(groups),
+               dimnames = list(groups, groups))
+
+ph_mat <- ph |>
+  select(group1, group2, p.adj) |>
+  mutate(group1 = as.character(group1),
+         group2 = as.character(group2))
+
+for (i in seq_len(nrow(ph_mat))) {
+  g1 <- ph_mat$group1[i]; g2 <- ph_mat$group2[i]; p  <- ph_mat$p.adj[i]
+  pmat[g1, g2] <- p
+  pmat[g2, g1] <- p
+}
+
+# Get letters (groups that do NOT differ share a letter)
+letters <- multcompView::multcompLetters(pmat, threshold = 0.05)$Letters
+letters_df <- tibble(subclade = names(letters), letters = unname(letters))
+
+# 2) Position the letters a bit above the data for each subclade
+
+offset <- 0.05 * diff(range(df$log_biofilm, na.rm = TRUE))
+
+label_pos <- df |>
+  dplyr::group_by(subclade) |>
+  dplyr::summarise(y = max(log_biofilm, na.rm = TRUE) + offset, .groups = "drop") |>
+  dplyr::left_join(letters_df, by = "subclade")
+
+# 3) Add to your plot
+plt_log +
+  geom_text(data = label_pos,
+            aes(x = subclade, y = y, label = letters),
+            fontface = "bold", vjust = 0)
+
+
+ggsave(
+      filename = here("output/biofilm/biofilm_log_dotplot_TopSubclades.png"),
+      width    = 180,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+
+
+```
+
+
+
+
+
+```{r print-plot, include=FALSE}
+
+print(plt)
+
+```
+
+

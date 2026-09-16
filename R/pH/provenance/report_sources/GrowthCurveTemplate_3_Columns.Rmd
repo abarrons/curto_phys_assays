@@ -1,0 +1,192 @@
+---
+title: "GrowthCurveTemplate"
+author: "BLu12"
+date: "2022-09-01"
+output: html_document
+---
+
+README: This is meant for the well plate when there is 3 columns for each strain and 3 columns of blanks. We'll be placing the blanks in columns 4 through 6.
+
+Purpose: This will give the population curves of each of the individual wells, along with a potential line of best fit from growthcurver. It's primary purpose is to function as a visual aid for the data, and to be able to pick through data to see if there are issues with the individual growth rate of a certain Strain-pH combination.
+```{r}
+
+library(growthcurver)
+
+#set working directory
+# working directory handled by here::here()
+
+# Read in the Data
+data <- read.csv(file=here::here("data-raw/pH/pHassay_022723.csv"), header = TRUE)
+
+#Enter Constants Here (Time Increment is in Minutes)
+time_increment <- 15
+total_hours <- 48
+
+
+#Initializing the new time array, and a pH range list 
+tminutes <- (total_hours*60/time_increment) + 1
+data$Time <- (1:tminutes)*time_increment
+pH_list <- seq(3.2, 10.1, 0.3)
+
+
+#Input Strain #1 (Columns 1, 2, and 3) Name in the Quotation Marks
+strain1_name <- "25G2A02"
+
+#Input Strain #2 (Columns 4, 5, and 6) Name in the Quotation Marks
+strain2_name <- "35G2B04"
+
+#Input Strain #3 (Columns 10, 11, and 12) Name in the Quotation Marks
+strain3_name <- "28D08"
+
+#STRAIN 1 [NAME] Code Block - Columns 1, 2, and 3 on Well Plate ----
+
+#This plots the 24 different pHs for the Given Strain with Peptone ([STRAIN] + P). Also scales the graph so that it's decently visible. 
+plot(0,0, type = "l", xlab = "Time (Minutes)", ylim = c(0, 1), xlim = c(0, tminutes*time_increment + 100), ylab = "Optical Density", main = strain2_name)
+
+#Initialization of empty list that aims to contain the growth rates
+grate_list1 <- list()
+
+#Takes three entries in a row for that strain, which have pH differences of 2.4. The loop iterates through all 8 rows (hence the + 12*i), and then puts it into growthcurver to fit the data. It then puts those values into the grate_list, which is an array with the growth rates for that strain that lines up with the pH_list (which is just a list with the pH range, using steps of 0.3). It also graphs the line of the OD curve onto the main plot.
+#Some Useful Info: data[,6 + 12*i] is the blanks, and the other data is the strain column
+for(i in 0:7){
+  lines(data$Time, data[,3+12*i] - data[, 6+12*i], col=c(i+1))
+  gc_fit <- SummarizeGrowth(data$Time, data[,3+12*i] - data[,6+12*i])
+  grate_list1[i+1] <- gc_fit$vals$r
+
+  lines(data$Time, data[,4+12*i] - data[,7+12*i], col=c(i+9))
+  gc_fit2 <- SummarizeGrowth(data$Time, data[,4+12*i] - data[,7+12*i])
+  grate_list1[i+9]=gc_fit2$vals$r
+  
+  lines(data$Time, data[,5+12*i] - data[, 8+12*i], col=c(i+17))
+  gc_fit3 <- SummarizeGrowth(data$Time, data[,5+12*i] - data[,8+12*i])
+  grate_list1[i+17] <- gc_fit$vals$r
+}
+legend("topleft", legend = c("pH 3.2", "pH 3.5", "pH 3.8", "pH 4.1", "pH 4.4", "pH 4.7", "pH 5.0", "pH 5.3", "pH 5.6", "pH 5.9", "pH 6.2", "pH 6.5", "pH 6.8", "pH 7.1", "pH 7.4", "pH 7.7", "pH 8.0",  "pH 8.3",  "pH 8.6",  "pH 8.9",  "pH 9.2",  "pH 9.5",  "pH 9.8",  "pH 10.1"), col = (1:25), lty = 1, cex = 0.5)
+```
+
+```{r}
+plot(0,0, type = "l", xlab = "Time (Minutes)", ylim = c(0, 1), xlim = c(0, tminutes*time_increment + 100), ylab = "Optical Density", main = strain1_name)
+#Independent graphs for columns 1, 2, and 3, which are [STRAIN]. These both print the growth curve fit summary, and also the growth curve itself with the data points.
+for(i in 0:7){
+  gc_fit <- SummarizeGrowth(data$Time, data[,3+12*i] - data[, 6+12*i])
+  gc_fit2 <- SummarizeGrowth(data$Time, data[,4+12*i] - data[, 7+12*i])
+  gc_fit3 <- SummarizeGrowth(data$Time, data[,5+12*i] - data[, 8+12*i])
+  cat("\n\n")
+  print(paste(3.2+0.3*i, "pH for ", strain1_name))
+  print(gc_fit)
+  
+  cat("\n\n")
+  print(paste(5.6+0.3*i, "pH for ", strain1_name))
+  print(gc_fit2)
+  
+  cat("\n\n")
+  print(paste(8.0+0.3*i, "pH for ", strain1_name))
+  print(gc_fit3)
+
+  plot(gc_fit, main = paste(3.2+0.3*i, "pH for ", strain1_name))
+  plot(gc_fit2, main = paste(5.6+0.3*i, "pH for ", strain1_name))
+  plot(gc_fit3, main = paste(8.0+0.3*i, "pH for ", strain1_name))
+}
+plot(pH_list, grate_list1, ylab = "Growth Rate", xlab = "pH", main = paste(strain1_name, " pH vs Growth Rate"))
+```
+
+```{r}
+#STRAIN 2 [NAME] Code Block - Columns 7, 8, and 9 on Well Plate ----
+
+#This plots the 24 different pHs for the Given Strain with Peptone ([STRAIN] + P). Also scales the graph so that it's decently visible. 
+plot(0,0, type = "l", xlab = "Time (Minutes)", ylim = c(0, 1), xlim = c(0, tminutes*time_increment + 100), ylab = "Optical Density", main = strain3_name)
+
+#Initialization of empty list that aims to contain the growth rates
+grate_list2 <- list()
+
+#Takes two entries in a row for that strain, which have pH difference of 2.4. The loop iterates through all 8 rows (hence the + 12*i), and then puts it into growthcurver to fit the data. It then puts those values into the grate_list, which is an array with the growth rates for that strain that lines up with the pH_list (which is just a list with the pH range, using steps of 0.3). It also graphs the line of the OD curve onto the main plot.
+#Some Useful Info: data[,7 + 12*i] is the blanks, and the other data is the strain column
+for(i in 0:7){
+  lines(data$Time, data[,9+12*i] - data[, 6+12*i], col=c(i+1))
+  gc_fit <- SummarizeGrowth(data$Time, data[,9+12*i] - data[,6+12*i])
+  grate_list2[i+1] <- gc_fit$vals$r
+
+  lines(data$Time, data[,10+12*i] - data[,7+12*i], col=c(i+9))
+  gc_fit2 <- SummarizeGrowth(data$Time, data[,10+12*i] - data[,7+12*i])
+  grate_list2[i+9]=gc_fit2$vals$r
+  
+  lines(data$Time, data[,11+12*i] - data[, 8+12*i], col=c(i+17))
+  gc_fit3 <- SummarizeGrowth(data$Time, data[,11+12*i] - data[,8+12*i])
+  grate_list2[i+17] <- gc_fit$vals$r
+}
+legend("topleft", legend = c("pH 3.2", "pH 3.5", "pH 3.8", "pH 4.1", "pH 4.4", "pH 4.7", "pH 5.0", "pH 5.3", "pH 5.6", "pH 5.9", "pH 6.2", "pH 6.5", "pH 6.8", "pH 7.1", "pH 7.4", "pH 7.7", "pH 8.0",  "pH 8.3",  "pH 8.6",  "pH 8.9",  "pH 9.2",  "pH 9.5",  "pH 9.8",  "pH 10.1"), col = (1:25), lty = 1, cex = 0.5)
+
+#Independent graphs for columns 1 and 2, which are [STRAIN]. These both print the growth curve fit summary, and also the growth curve itself with the data points.
+for(i in 0:7){
+  gc_fit <- SummarizeGrowth(data$Time, data[,9+12*i] - data[, 6+12*i])
+  gc_fit2 <- SummarizeGrowth(data$Time, data[,10+12*i] - data[, 7+12*i])
+  gc_fit3 <- SummarizeGrowth(data$Time, data[,11+12*i] - data[, 8+12*i])
+  cat("\n\n")
+  print(paste(3.2+0.3*i, "pH for ", strain2_name))
+  print(gc_fit)
+  
+  cat("\n\n")
+  print(paste(5.6+0.3*i, "pH for ", strain2_name))
+  print(gc_fit2)
+  
+  cat("\n\n")
+  print(paste(8.0+0.3*i, "pH for ", strain2_name))
+  print(gc_fit3)
+
+  plot(gc_fit, main = paste(3.2+0.3*i, "pH for ", strain2_name))
+  plot(gc_fit2, main = paste(5.6+0.3*i, "pH for ", strain2_name))
+  plot(gc_fit3, main = paste(8.0+0.3*i, "pH for ", strain2_name))
+}
+plot(pH_list, grate_list2, ylab = "Growth Rate", xlab = "pH", main = paste(strain2_name, " pH vs Growth Rate"))
+```
+
+```{r}
+#STRAIN 3 [NAME] Code Block - Columns 10, 11, and 12 on Well Plate ----
+
+#This plots the 24 different pHs for the Given Strain with Peptone ([STRAIN] + P). Also scales the graph so that it's decently visible. 
+plot(0,0, type = "l", xlab = "Time (Minutes)", ylim = c(0, 1), xlim = c(0, tminutes*time_increment + 100), ylab = "Optical Density", main = strain3_name)
+
+#Initialization of empty list that aims to contain the growth rates
+grate_list3 <- list()
+
+#Takes three entries in a row for that strain, which have pH differences of 2.4. The loop iterates through all 8 rows (hence the + 12*i), and then puts it into growthcurver to fit the data. It then puts those values into the grate_list, which is an array with the growth rates for that strain that lines up with the pH_list (which is just a list with the pH range, using steps of 0.3). It also graphs the line of the OD curve onto the main plot.
+#Some Useful Info: data[,7 + 12*i] is the blanks, and the other data is the strain column
+for(i in 0:7){
+  lines(data$Time, data[,12+12*i] - data[, 6+12*i], col=c(i+1))
+  gc_fit <- SummarizeGrowth(data$Time, data[,12+12*i] - data[,6+12*i])
+  grate_list3[i+1] <- gc_fit$vals$r
+
+  lines(data$Time, data[,13+12*i] - data[,7+12*i], col=c(i+9))
+  gc_fit2 <- SummarizeGrowth(data$Time, data[,13+12*i] - data[,7+12*i])
+  grate_list3[i+9]=gc_fit2$vals$r
+  
+  lines(data$Time, data[,14+12*i] - data[, 8+12*i], col=c(i+17))
+  gc_fit3 <- SummarizeGrowth(data$Time, data[,14+12*i] - data[,8+12*i])
+  grate_list3[i+17] <- gc_fit$vals$r
+}
+legend("topleft", legend = c("pH 3.2", "pH 3.5", "pH 3.8", "pH 4.1", "pH 4.4", "pH 4.7", "pH 5.0", "pH 5.3", "pH 5.6", "pH 5.9", "pH 6.2", "pH 6.5", "pH 6.8", "pH 7.1", "pH 7.4", "pH 7.7", "pH 8.0",  "pH 8.3",  "pH 8.6",  "pH 8.9",  "pH 9.2",  "pH 9.5",  "pH 9.8",  "pH 10.1"), col = (1:25), lty = 1, cex = 0.5)
+
+#Independent graphs for columns 10, 11, and 12, which are [STRAIN]. These both print the growth curve fit summary, and also the growth curve itself with the data points.
+for(i in 0:7){
+  gc_fit <- SummarizeGrowth(data$Time, data[,12+12*i] - data[, 6+12*i])
+  gc_fit2 <- SummarizeGrowth(data$Time, data[,13+12*i] - data[, 7+12*i])
+  gc_fit3 <- SummarizeGrowth(data$Time, data[,14+12*i] - data[, 8+12*i])
+  cat("\n\n")
+  print(paste(3.2+0.3*i, "pH for ", strain3_name))
+  print(gc_fit)
+  
+  cat("\n\n")
+  print(paste(5.6+0.3*i, "pH for ", strain3_name))
+  print(gc_fit2)
+  
+  cat("\n\n")
+  print(paste(8.0+0.3*i, "pH for ", strain3_name))
+  print(gc_fit3)
+
+  plot(gc_fit, main = paste(3.2+0.3*i, "pH for ", strain3_name))
+  plot(gc_fit2, main = paste(5.6+0.3*i, "pH for ", strain3_name))
+  plot(gc_fit3, main = paste(8.0+0.3*i, "pH for ", strain3_name))
+}
+plot(pH_list, grate_list3, ylab = "Growth Rate", xlab = "pH", main = paste(strain3_name, " pH vs Growth Rate"))
+
+```

@@ -1,0 +1,465 @@
+---
+title: "Strain - assay table"
+author: "Alberto Barron"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 11
+    fig_height: 7
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r general settings, message=FALSE, warning=FALSE, results='hold', echo=FALSE, include=FALSE}
+library(tidyverse)
+library(reshape2)
+library(tidyr)
+library(broom)
+library(here)
+
+apatheme=theme_bw()+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        text=element_text(family='Arial'))
+
+```
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  cache = F,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 5
+)
+options(scipen=999, digits = 12)
+set.seed(seed = 711)
+
+# Output directory for combined figures (gitignored)
+dir.create(here("output/shared"), recursive = TRUE, showWarnings = FALSE)
+```
+
+
+```{r load tables, warning=FALSE, echo=FALSE, message=FALSE, results='hide'}
+
+
+temp <- read.table(here("output/temp/temp_strain_table.txt"), header = T)
+biofilm <- read.table(here("output/biofilm/biofilm_strain_table.txt"), header = T)
+pH <- read.table(here("output/pH/pH_strain_table.txt"), header = T)
+
+## Let's get the metadata info for each strain. For that we need to read in the master metadata table.
+master_md <- read.table(here("data/shared/master_md_all_sequenced_Isolates_with_extendedMD.txt"), header = T, sep = "\t")
+
+master_md <- master_md %>% select(Name, clade, subclade)
+
+
+#now let's match the clade colors to the metadata
+clade_colors <- read.table(here("data/shared/clade_colors.txt"), header = T, sep = "\t", comment.char = "")
+
+clades_colors <- deframe(clade_colors)
+
+
+temp <- temp |>
+  filter(!is.na(StrainID) & StrainID != "08G4B02")
+
+
+main <- biofilm |>
+  left_join(temp, by = "StrainID") |>
+  mutate(temp = case_when(is.na(temp) ~ "no",
+                        .default = temp)) |>
+  left_join(pH, by = "StrainID") |>
+  mutate(pH = case_when(is.na(pH) ~ "no",
+                        .default = pH)) |>
+  left_join(master_md, by = c("StrainID" = "Name"))
+
+main_long <- main %>%
+  pivot_longer(
+    cols      = c(temp, biofilm, pH),
+    names_to  = "assay",
+    values_to = "tested"
+  ) %>%
+  filter(tested == "yes")
+
+# summarize
+sum_assay <- main_long %>% 
+  distinct(StrainID, assay) %>% 
+  count(assay)
+
+# bar chart
+ggplot(sum_assay, aes(x = assay, y = n, fill = assay)) +
+  geom_col() +
+  labs(
+    x = "Assay",
+    y = "Number of strains",
+    title = "Strains per assay"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+sum_clade <- main_long %>%
+  count(assay, clade)
+
+ggplot(sum_clade, aes(x = assay, y = n, fill = clade)) +
+  geom_col() +
+  scale_fill_manual(values = clades_colors) +
+  labs(
+    x = "Assay",
+    y = "Number of strains",
+    fill = "Clade",
+    title = "Strains per assay, by clade"
+  ) +
+  theme_minimal()
+
+sum_sub <- main_long %>%
+  count(assay, clade, subclade)
+
+ggplot(sum_sub |> filter(!clade  %in%  c("UND", "V") & !is.na(clade)),
+       aes(x = assay, y = n, fill = subclade)) +
+  geom_col() +
+  scale_fill_manual(values = clades_colors) +
+  facet_wrap(~ clade) +
+  labs(
+    x = "Assay",
+    y = "Count",
+    fill = "Subclade",
+    title = "Subclade breakdown per assay, faceted by clade"
+  ) +
+  theme_minimal()
+
+library(ggh4x)
+
+ggplot(sum_sub |> filter(!clade  %in%  c("UND", "V") & !is.na(clade) & !is.na(subclade)),
+       aes(x = assay, y = n, fill = subclade)) +
+  geom_col() +
+  scale_fill_manual(values = clades_colors) +
+  facet_nested( ~ clade + subclade, scales = "free_y", space = "free") +
+  labs(
+    x = "Assay",
+    y = "Count",
+    fill = "Subclade",
+    title = "Assays × Clade/Subclade"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text.y = element_text(angle = 0)
+  )
+
+
+
+# 1. Identify strains tested in all three assays
+all3 <- main %>%
+  filter(temp == "yes", biofilm == "yes", pH == "yes")
+
+# 2. How many?
+n_all3 <- n_distinct(all3$StrainID)
+message("Number of strains assayed for all three traits: ", n_all3)
+
+# 3. Distribution by clade
+ggplot(all3 |> filter(!clade  %in%  c("UND", "V") & !is.na(clade) & !is.na(subclade)),
+       aes(x = clade)) +
+  geom_bar(aes(fill = clade)) +
+  scale_fill_manual(values = clades_colors) +
+  labs(
+    x = "Clade",
+    y = "Number of strains",
+    title = "Strains assayed for temp, biofilm, and pH\n(broken down by clade)"
+  ) +
+  theme_minimal()
+
+# 4. Distribution by subclade (faceted)
+ggplot(all3 |> filter(!clade  %in%  c("UND", "V") & !is.na(clade) & !is.na(subclade)),
+       aes(x = subclade)) +
+  geom_bar(aes(fill = subclade)) +
+  scale_fill_manual(values = clades_colors) +
+  facet_wrap(~ clade, scales = "free_x") +
+  labs(
+    x = "Subclade",
+    y = "Count",
+    title = "Subclade breakdown of fully-assayed strains"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#install.packages("UpSetR")
+library(UpSetR)
+
+# build a list of sets
+sets <- list(
+  temp    = main %>% filter(temp == "yes")    %>% pull(StrainID) %>% unique(),
+  biofilm = main %>% filter(biofilm == "yes") %>% pull(StrainID) %>% unique(),
+  pH      = main %>% filter(pH == "yes")      %>% pull(StrainID) %>% unique()
+)
+
+# draw an UpSet plot
+upset(fromList(sets), 
+      nsets = 3, 
+      order.by = "freq",
+      mainbar.y.label = "Intersection Size",
+      sets.x.label = "Set Size")
+
+library(ggvenn)
+
+# same sets list as above
+sets <- list(
+  Temp    = unique(main$StrainID[main$temp    == "yes"]),
+  Biofilm = unique(main$StrainID[main$biofilm == "yes"]),
+  pH      = unique(main$StrainID[main$pH      == "yes"])
+)
+
+# ggvenn
+ggvenn(
+  sets,
+  fill_color = c("#FF6666",
+                 "#6699CC",
+                 "#66CC66"),
+  stroke_size = 0.5,
+  set_name_size = 4
+) +
+  labs(title = "Overlap of strains assayed for Temp, Biofilm & pH")
+
+
+```
+
+
+### Correlations
+
+```{r correlations, fig.width=25, fig.height=20}
+library(Hmisc)
+library(corrplot)
+
+pH_params <- read.table(here("output/pH/curve_params.tsv"), header = T)
+pH_params <- pH_params |> rename(strain = Strain)
+
+temp_params <- read.table(here("output/temp/temp_curve_params_table.txt"), header = T)
+biofilm <- read.table(here("output/biofilm/biofilm_avg_data.txt"), header = T)
+
+### first correlations with pH parameters
+
+pH_num <- pH_params[ , sapply(pH_params, is.numeric) ]
+pH_res <- rcorr(as.matrix(pH_num), type = "pearson")
+
+pH_corr_mat <- pH_res$r      # correlation coefficients
+pH_p_mat    <- pH_res$P      # corresponding p‐values
+
+#dim(pH_corr_mat)
+#dim(pH_p_mat)
+#names(pH_corr_mat)
+#names(pH_p_mat)
+
+pH_p_mat[is.na(pH_p_mat)] <- 0
+
+# Only show significant correlations (p < 0.05):
+pH_corrplot <- corrplot(
+  pH_corr_mat,
+  method        = "circle",
+  type          = "upper",
+  tl.col        = "black",
+  addCoef.col   = "black",    # add correlation coefficients
+  diag = F,
+  p.mat         = pH_p_mat,
+  sig.level     = 0.05,
+  insig         = "blank"     # hide nonsignificant
+)
+
+GGally::ggpairs(pH_num, columns = 1:ncol(pH_num))
+
+
+#pH_corrplot
+
+temp_num <- temp_params[ , sapply(temp_params, is.numeric) ]
+temp_res <- rcorr(as.matrix(temp_num), type = "pearson")
+
+temp_corr_mat <- temp_res$r      # correlation coefficients
+temp_p_mat    <- temp_res$P      # corresponding p‐values
+
+temp_p_mat[is.na(temp_p_mat)] <- 0
+
+# Only show significant correlations (p < 0.05):
+temp_corrplot <- corrplot(
+  temp_corr_mat,
+  method        = "circle",
+  type          = "upper",
+  tl.col        = "black",
+  addCoef.col   = "black",    # add correlation coefficients
+    diag = F,
+  p.mat         = temp_p_mat,
+  sig.level     = 0.05,
+  insig         = "blank"     # hide nonsignificant
+)
+
+GGally::ggpairs(temp_num, columns = 1:ncol(temp_num))
+
+#temp_corrplot
+
+## now pH against temp for strains that have a match on both
+
+merged_params <- inner_join(
+  pH_params,
+  temp_params,
+  by = "strain"
+) |>
+  inner_join(biofilm,
+             by = c("strain" = "StrainID")) |>
+  rename(c(breadth_pH_r = breadth_r,
+           breadth_pH_k = breadth_k,
+           pH_r_max = max_r_mean,
+           pH_k_max = max_k_mean,
+           temp_r_max = rmax,
+           breadth_temp = breadth))
+
+
+merged_num <- merged_params[ , sapply(merged_params, is.numeric) ]
+merged_res <- rcorr(as.matrix(merged_num), type = "pearson")
+
+merged_corr_mat <- merged_res$r      # correlation coefficients
+merged_p_mat    <- merged_res$P      # corresponding p‐values
+
+merged_p_mat[is.na(merged_p_mat)] <- 0
+
+# Only show significant correlations (p < 0.05):
+merged_corrplot <- corrplot(
+  merged_corr_mat,
+  method        = "circle",
+  type          = "upper",
+  tl.col        = "black",
+  addCoef.col   = "black",    # add correlation coefficients
+  diag = F,
+  p.mat         = merged_p_mat,
+  sig.level     = 0.05,
+  insig         = "blank"     # hide nonsignificant
+)
+
+
+#GGally::ggpairs(merged_num, columns = 1:ncol(merged_num))
+
+
+
+panel_scatter_info <- function(data, mapping, method = "pearson",
+                               box_alpha = 0.25,  # 0 = fully transparent, 1 = opaque
+                               box_fill  = "white",
+                               text_size = 4,
+                               pad_lines = 0.06,  # tighter box padding
+                               ...) {
+  x  <- GGally::eval_data_col(data, mapping$x)
+  y  <- GGally::eval_data_col(data, mapping$y)
+  ok <- stats::complete.cases(x, y)
+
+  ct  <- suppressWarnings(stats::cor.test(x[ok], y[ok], method = method))
+  fit <- stats::lm(y ~ x, subset = ok)
+  lab <- sprintf("r = %.2f\np = %.3g\nR² = %.2f\nn = %d",
+                 ct$estimate, ct$p.value, summary(fit)$r.squared, sum(ok))
+
+  ggplot(data, mapping) +
+    geom_point(alpha = 0.6, size = 1.6) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
+    annotate("label",
+             x = -Inf, y = Inf, hjust = -0.05, vjust = 1.1,
+             label = lab, size = text_size, lineheight = 0.9,
+             label.size = 0,                                # no border
+             label.r = unit(0.05, "lines"),                 # small corner radius
+             label.padding = unit(pad_lines, "lines"),      # tighter box
+             fill = alpha(box_fill, box_alpha))             # translucent fill
+}
+
+
+#Example ggpairs call
+theme_set(theme_bw(base_size = 15))
+#GGally::ggpairs(
+#  merged_num,
+#  columns = 2:ncol(merged_num),
+#  lower = list(continuous = panel_scatter_info),
+#  upper = list(continuous = GGally::wrap("cor", size = 5)),
+#  diag  = list(continuous = GGally::wrap("densityDiag"))
+#)
+
+
+
+panel_cor_sig <- function(data, mapping, method = "pearson", alpha = 0.05, ...) {
+  x <- GGally::eval_data_col(data, mapping$x)
+  y <- GGally::eval_data_col(data, mapping$y)
+  ok <- stats::complete.cases(x, y)
+  ct <- suppressWarnings(stats::cor.test(x[ok], y[ok], method = method))
+  r  <- unname(ct$estimate); p <- ct$p.value
+  lab <- sprintf("%.2f%s", r,
+                 ifelse(p < .001, "***", ifelse(p < .01, "**", ifelse(p < .05, "*", ""))))
+  sig <- is.finite(p) && p < alpha
+
+  ggplot() +
+    annotate("text", x = .5, y = .5, label = lab, size = 5,
+             fontface = if (sig) "bold" else "plain",
+             colour   = if (sig) "firebrick" else "grey40") +
+    theme_void()
+}
+
+panel_scatter_sig <- function(data, mapping, method = "lm", alpha = 0.05, ...) {
+  x <- GGally::eval_data_col(data, mapping$x)
+  y <- GGally::eval_data_col(data, mapping$y)
+  ok <- stats::complete.cases(x, y)
+  p  <- tryCatch(stats::cor.test(x[ok], y[ok])$p.value, error = function(e) NA_real_)
+  sig <- is.finite(p) && p < alpha
+
+  ggplot(data, mapping) +
+    geom_point(size = 1.6, alpha = if (sig) 0.7 else 0.15) +
+    geom_smooth(method = method, se = FALSE,
+                linewidth = if (sig) 0.9 else 0.4,
+                linetype  = if (sig) "solid" else "dashed")
+}
+
+
+
+colnames_r <- colnames(merged_num |> select(ends_with("_r"),
+                     "pH_r_max", "temp_r_max", "ctmin", "ctmax", "topt", "breadth_temp", "biofilm_index"))
+colnames_k <- colnames(merged_num |> select(ends_with("_k"),
+                     "pH_k_max", "temp_r_max", "ctmin", "ctmax", "topt", "breadth_temp", "biofilm_index"))
+
+
+GGally::ggpairs(
+  merged_num,
+  columns = colnames_r,
+  lower = list(continuous = panel_scatter_sig),
+  upper = list(continuous = panel_cor_sig),
+  diag  = list(continuous = GGally::wrap("densityDiag"))
+)
+
+
+ggsave(here("output/shared/all_traits_corr_pH_r.png"),
+       width =  300,
+       height = 300*0.75,
+       units = "mm",
+       dpi = 320)
+
+
+GGally::ggpairs(
+  merged_num,
+  columns = colnames_k,
+  lower = list(continuous = panel_scatter_sig),
+  upper = list(continuous = panel_cor_sig),
+  diag  = list(continuous = GGally::wrap("densityDiag"))
+)
+
+
+ggsave(here("output/shared/all_traits_corr_pH_k.png"),
+       width =  300,
+       height = 300*0.75,
+       units = "mm",
+       dpi = 320)
+
+
+GGally::ggpairs(
+  merged_num,
+  columns = c("opt_pH_r", "opt_pH_k"),
+  lower = list(continuous = panel_scatter_sig),
+  upper = list(continuous = panel_cor_sig),
+  diag  = list(continuous = GGally::wrap("densityDiag"))
+)
+
+
+```
+

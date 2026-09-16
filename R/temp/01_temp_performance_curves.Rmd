@@ -1,0 +1,4766 @@
+---
+title: "Thermal Performance Curves"
+author: "Alberto Barron"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 11
+    fig_height: 7
+editor_options: 
+  chunk_output_type: console
+  markdown: 
+    wrap: 72
+---
+
+#### Description
+
+This script will consolidate the processed data from the initial GC
+analysis and merge it into a larger file. Then it calculates mean values
+across replicates of the same strain and temperature. Finally it
+calculates mean growth rate and sd for each combination and plots the
+values against temperature.
+
+```{r setup, include=FALSE}
+library(here)
+knitr::opts_chunk$set(echo = F, cache = F)
+
+# Output directories (gitignored; created on a fresh clone)
+dir.create(here("output/temp/plots/temp_curves"), recursive = TRUE, showWarnings = FALSE)
+dir.create(here("output/temp/tables"), recursive = TRUE, showWarnings = FALSE)
+dir.create(here("output/rds"), recursive = TRUE, showWarnings = FALSE)
+
+knitr::opts_knit$set(root.dir = here("output/temp"))
+options(scipen=10000, digits = 12)
+set.seed(seed = 711)
+```
+
+```{r general settings, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
+
+library(growthcurver)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(purrr)
+library(tuple)
+library(tidyr)
+library(broom)
+
+apatheme=theme_bw()+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        text=element_text(family='Arial'))
+
+
+#"#c5add8" "#c90076" "#8da8f3" "#fff2cc" "#ff0000" "#00ff00" "#c90077"
+```
+
+```{r set working directory and load and merge, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
+# Working directory handled by here(); GC_values inputs live in data/temp
+file_list <- list.files(path = here("data/temp"), pattern = "^GC_values_Temp_assay\\..*\\.txt$", full.names = TRUE)
+
+
+for (file in file_list){
+      
+  # if the merged dataset doesn't exist, create it
+  if (!exists("all.data")){
+    all.data <- read.table(file, header=TRUE, sep="\t")
+  }
+  
+  # if the merged dataset does exist, append to it
+  if (exists("all.data")){
+    temp_dataset <-read.table(file, header=TRUE, sep="\t")
+    all.data<-unique(plyr::rbind.fill(all.data, temp_dataset))
+    rm(temp_dataset)
+  }
+}
+```
+
+### Number of assays and ANOVAS for each Temperature and strain across date of the assay
+
+```{r number of assays summary and ANOVAS, message=FALSE, warning=FALSE, echo=FALSE, fig.height=18, fig.width=12}
+
+## Let's get the metadata info for each strain. For that we need to read in the master metadata table.
+master_md <- read.table(here("data/shared/master_md_all_sequenced_Isolates_with_extendedMD.txt"), header = T, sep = "\t")
+
+
+clade_info <- merge(all.data, master_md, by.x = "StrainID", by.y = "Name", all.x = T) %>% select(StrainID, clade, subclade) %>% distinct()
+
+all.data <-merge(all.data, clade_info, by = "StrainID", all.x = T)
+
+all.data$strain.date<-c(paste(all.data$StrainID, all.data$date, sep = "."))
+all.data$strain.rep<-c(paste(all.data$StrainID, all.data$replicate, sep = "."))
+all.data$strain.date.rep<-c(paste(all.data$StrainID, all.data$date, all.data$replicate, sep = "."))
+
+#now let's match the clade colors to the metadata
+clade_colors <- read.table(here("data/shared/clade_colors.txt"), header = T, sep = "\t", comment.char = "")
+all.data$clade_color <- clade_colors$color[match(all.data$clade, clade_colors$variable)]
+all.data$subclade_color <- clade_colors$color[match(all.data$subclade, clade_colors$variable)]
+
+na_strains <- all.data %>% filter(is.na(clade)) %>% distinct(StrainID)
+
+
+## create strings to color by:
+## clade:
+clade_col <- as.character(all.data$clade_color)
+names(clade_col) <- as.character(all.data$clade)
+# strain by clade color
+strain_clade_col <- as.character(all.data$clade_color)
+names(strain_clade_col) <- as.character(all.data$StrainID)
+
+## subclade:
+subclade_col <- as.character(all.data$subclade_color)
+names(subclade_col) <- as.character(all.data$subclade)
+# strain by clade color
+strain_subclade_col <- as.character(all.data$subclade_color)
+names(strain_subclade_col) <- as.character(all.data$StrainID)
+
+
+## now let's find all the Strains that have been tested on different assays (dates)
+
+strain_counts <- all.data %>%
+  group_by(StrainID) %>%
+  filter(n_distinct(date) >= 2) %>%
+  summarise(dates = list(unique(date)))
+
+```
+
+We will first analyse those strain that have been tested in different
+assays (dates) to asses whether the results are consistent.
+
+```{r assesing reproducibility, message=FALSE, warning=FALSE, echo=FALSE, fig.height=8, fig.width=12}
+tested_2orMore <- all.data %>%
+  filter(StrainID %in% strain_counts$StrainID) %>%
+  select(StrainID, replicate, r, date, Temp)
+
+# Step 2: Count the number of unique dates for each strain
+strain_date_counts <- tested_2orMore %>%
+  group_by(StrainID) %>%
+  summarise(unique_dates = n_distinct(date))
+
+# Step 3: Filter strains with 3 or more unique dates
+strains_with_3_or_more_dates <- strain_date_counts %>%
+  filter(unique_dates >= 3)
+
+
+# let's leave out from the analysis this one for now and move on with the others
+tested_2orMore <- tested_2orMore %>%
+  filter(!StrainID %in% c(na_strains,"33G4B08"))
+
+
+# Function to calculate correlations for a given subset of data
+calculate_correlations <- function(df, dates_to_compare) {
+  # Pivot data to wide format with r values for each date as separate columns
+  pivoted_data <- df %>%
+    filter(date %in% dates_to_compare) %>%
+    pivot_wider(names_from = date, values_from = r, names_prefix = "Date_", values_fn = list)
+  
+  # Ensure all necessary columns are present and fill missing values with NA
+  necessary_columns <- c("StrainID", "replicate", "Temp", paste0("Date_", dates_to_compare))
+  for (col in necessary_columns) {
+    if (!col %in% colnames(pivoted_data)) {
+      pivoted_data[[col]] <- NA
+    }
+  }
+  
+  # Unnest list columns to individual rows
+  pivoted_data <- pivoted_data %>%
+    unnest(cols = c(starts_with("Date_")))
+  
+  # Convert columns to numeric to ensure compatibility with cor()
+  pivoted_data <- pivoted_data %>%
+    mutate(across(starts_with("Date_"), ~ as.numeric(unlist(.))))
+  
+  # Calculate correlation for each subset
+  calc_correlation <- function(df) {
+    numeric_cols <- df[, -c(1:3)]
+    if (ncol(numeric_cols) < 2) {
+      return(NA)
+    }
+    # Check for at least two non-NA values in each column
+    if (any(colSums(!is.na(numeric_cols)) < 2)) {
+      return(NA)
+    }
+    # Calculate the correlation
+    cor_result <- cor(numeric_cols[[1]], numeric_cols[[2]], use = "pairwise.complete.obs")
+    return(cor_result)
+  }
+  
+  # Apply the function to calculate correlations for the subset
+  correlation_value <- calc_correlation(pivoted_data)
+  
+  return(tibble(StrainID = df$StrainID[1],
+                correlation = correlation_value))
+}
+
+# Filter data to include only the dates we want to compare
+dates_to_compare_1 <- c("2024-01-14", "2024-02-20")
+dates_to_compare_2 <- c("2024-03-14", "2024-04-15")
+
+# Process data by StrainID and replicate
+correlation_results_1 <- tested_2orMore %>%
+  group_by(StrainID, #replicate
+           ) %>%
+  arrange(Temp) %>%
+  do(calculate_correlations(., dates_to_compare_1)) %>%
+  ungroup()
+
+# Process data by StrainID and replicate
+correlation_results_2 <- tested_2orMore %>%
+  group_by(StrainID, #replicate
+           ) %>%
+  arrange(Temp) %>%
+  do(calculate_correlations(., dates_to_compare_2)) %>%
+  ungroup()
+
+# Combine the two sets of correlation results
+combined_cor_results <- bind_rows(
+  correlation_results_1 %>% mutate(date_set = "2024-01-14 to 2024-02-20"),
+  correlation_results_2 %>% mutate(date_set = "2024-03-14 to 2024-04-15")
+)
+
+
+# now let's do the same for carrying capacity (K)
+
+tested_2orMore <- all.data %>%
+  filter(StrainID %in% strain_counts$StrainID) %>%
+  select(StrainID, replicate, k, date, Temp)
+
+# let's leave out from the analysis this one for now and move on with the others
+tested_2orMore <- tested_2orMore %>%
+  filter(!StrainID %in% c(na_strains,"33G4B08"))
+
+# Function to calculate correlations for a given subset of data
+calculate_correlations_k <- function(df, dates_to_compare) {
+  # Pivot data to wide format with r values for each date as separate columns
+  pivoted_data <- df %>%
+    filter(date %in% dates_to_compare) %>%
+    pivot_wider(names_from = date, values_from = k, names_prefix = "Date_", values_fn = list)
+  
+  # Ensure all necessary columns are present and fill missing values with NA
+  necessary_columns <- c("StrainID", "replicate", "Temp", paste0("Date_", dates_to_compare))
+  for (col in necessary_columns) {
+    if (!col %in% colnames(pivoted_data)) {
+      pivoted_data[[col]] <- NA
+    }
+  }
+  
+  # Unnest list columns to individual rows
+  pivoted_data <- pivoted_data %>%
+    unnest(cols = c(starts_with("Date_")))
+  
+  # Convert columns to numeric to ensure compatibility with cor()
+  pivoted_data <- pivoted_data %>%
+    mutate(across(starts_with("Date_"), ~ as.numeric(unlist(.))))
+  
+  # Calculate correlation for each subset
+  calc_correlation <- function(df) {
+    numeric_cols <- df[, -c(1:3)]
+    if (ncol(numeric_cols) < 2) {
+      return(NA)
+    }
+    # Check for at least two non-NA values in each column
+    if (any(colSums(!is.na(numeric_cols)) < 2)) {
+      return(NA)
+    }
+    # Calculate the correlation
+    cor_result <- cor(numeric_cols[[1]], numeric_cols[[2]], use = "pairwise.complete.obs")
+    return(cor_result)
+  }
+  
+  # Apply the function to calculate correlations for the subset
+  correlation_value <- calc_correlation(pivoted_data)
+  
+  return(tibble(StrainID = df$StrainID[1],
+                correlation = correlation_value))
+}
+
+# Process data by StrainID and replicate
+correlation_results_1_k <- tested_2orMore %>%
+  group_by(StrainID, #replicate
+           ) %>%
+  arrange(Temp) %>%
+  do(calculate_correlations_k(., dates_to_compare_1)) %>%
+  ungroup()
+
+# Process data by StrainID and replicate
+correlation_results_2_k <- tested_2orMore %>%
+  group_by(StrainID, #replicate
+           ) %>%
+  arrange(Temp) %>%
+  do(calculate_correlations_k(., dates_to_compare_2)) %>%
+  ungroup()
+
+# Combine the two sets of correlation results
+combined_cor_results_k <- bind_rows(
+  correlation_results_1_k %>% mutate(date_set = "2024-01-14 to 2024-02-20"),
+  correlation_results_2_k %>% mutate(date_set = "2024-03-14 to 2024-04-15")
+)
+
+
+combined_cor_results_all <- bind_rows(
+  combined_cor_results %>% mutate(parameter = "r"),
+  combined_cor_results_k %>% mutate(parameter = "k")
+)
+
+
+
+# Create the density plot
+cor_plot <- ggplot(combined_cor_results_all, aes(x = correlation, fill = date_set)) +
+  geom_density(alpha = 0.5) +
+  facet_grid(~parameter, scales = "free", space = "free_y") +
+  labs(title = "Density Plot of Correlation Values for carrying capacity (K) and growth rate (r)",
+       subtitle = "Strains tested across different dates",
+       x = "Correlation",
+       y = "Density",
+       fill = "Date Set") +
+  apatheme +
+  theme(legend.position = "bottom")
+print(cor_plot)
+
+ggsave("plots/correlation_densityplots.png",
+       width = 25,
+       height = 20,
+       units = "cm",
+       dpi = 600)
+
+
+```
+
+### Fitting thermal performance curves
+
+Now let's plot the curves using a fitted model. for this we will use the
+package "rTPC"
+
+```{r fitting thermnal performance curves with rTPC, message=FALSE, warning=FALSE, echo=FALSE, fig.height=18, fig.width=12}
+# load packages
+library(rTPC)
+library(nls.multstart)
+library(MuMIn)
+
+## first we need to do a clean up the data, remove unecessary columns and probably calculating averages for growthg rate (r)
+
+d <- all.data %>%
+  filter(!StrainID %in% c(na_strains,"33G4B08")) |>
+  select(StrainID, r, k, Temp, date, replicate, strain.date) %>%
+  group_by(StrainID, date, Temp) %>% 
+  summarise(r_mean = mean(r),
+            r_sd   = sd(r),
+            k_mean = mean(k),
+            k_sd   = sd(k), .groups = "drop") %>% 
+  rename(temp = Temp, rate = r_mean, strain = StrainID)
+
+### Set aside a few other strain for Alejandra, we will use both growth rate (r) and carrying capacity (K)
+### NOTE: "Grass-7", "MMLR14-010" and "Grass-32", not tested because we only tested clade 1 Alex's strains.
+
+
+d4A <-  as.data.frame(all.data %>%
+  filter(
+        StrainID %in% c("Grass-54",
+                        "Grass-40",
+                        "Grass-44",
+                        "Grass-45",
+                        "Grass-57",
+                        "Grass-31",
+                        "Grass-42",
+                        "Grass-43",
+                        "Mmlr14-002",
+                        "Grass-36") |
+          subclade %in% c("IA", "IB")) %>%
+  select(StrainID, r, k, Temp, date, replicate, subclade) %>%
+  group_by(StrainID, date, Temp) %>% 
+  summarise(r_mean = mean(r),
+            k_mean = mean(k),
+            r_sd = sd(r),
+            k_sd = sd(k), .groups = "drop") %>% 
+    left_join(clade_info |> select(StrainID, subclade),
+              by = "StrainID") |> 
+  rename(temp = Temp, strain = StrainID, rate = r_mean))
+
+write.table(d4A,
+            file = "tables/observed_values_selected_strains.txt",
+            row.names = F,
+            col.names = T,
+            quote = F,
+            sep = "\t")
+
+
+```
+
+```{r fit fit curves function, message=FALSE, warning=FALSE, echo=FALSE}
+# when scaling up our code to fit hundreds of models, its nice to have a progress bar
+# edit nls_multstart to allow for a progress bar
+# Function to fit models with progress bar
+nls_multstart_progress <- function(formula,
+                                   data = parent.frame(),
+                                   iter,
+                                   start_lower, 
+                                   start_upper,
+                                   supp_errors = c("Y", "N"),
+                                   convergence_count = 100, 
+                                   control,
+                                   modelweights, ...){
+  if(!is.null(pb)){
+    pb$tick()
+  }
+  tryCatch({
+    nls_multstart(formula = formula,
+                  data = data,
+                  iter = iter,
+                  start_lower = start_lower, 
+                  start_upper = start_upper,
+                  supp_errors = supp_errors,
+                  convergence_count = convergence_count, 
+                  control = control,
+                  modelweights = modelweights, ...)
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+```
+
+We will fit several different models and evaluate the model performance
+through AICc scores **and** select the overall best fitting model
+
+-   Sharpe–Schoolfield (full) (sharpeschoolfull_1981)
+-   Sharpe–Schoolfield (high) (sharpeschoolhigh_1981)
+-   Johnson–Lewin (1946) (johnsonlewin_1946)
+-   Pawar (2018) (pawar_2018)
+-   briereextended_2021() briere2_1999()
+-   weibull_1995()
+
+######### Fitting curves for Alejandra
+
+Since we already calculate curves with growth rate (r) now we will just
+calculate TPC with carrying capacity (k) or max yield.
+
+```{r r and k curves 4 Alejandra, message=FALSE, warning=FALSE, echo=FALSE}
+
+
+# Filter out strains with too many zero values
+d_filtered <- d4A %>%
+  group_by(strain, date) %>%
+  filter(sum(k_mean == 0) / n() < 0.5) %>% # Remove strains with 25% or more zero values
+  ungroup() |>
+  mutate(strain.date = paste(strain, date, sep = ".")) |>
+  select(-c(strain, date, r_sd, rate, k_sd)) |>
+  relocate(strain.date, .before = 1) |>
+  rename(rate = k_mean)
+
+# Filter out strains with too many zero values and keep them for later analysis
+d_filtered_out <- d4A %>%
+  group_by(strain, date) %>%
+  filter(sum(k_mean == 0) / n() > 0.5) %>% # Remove strains with 25% or more zero values
+  ungroup()
+
+length(unique(d_filtered$strain.date))
+
+
+
+# Set up progress bar
+number_of_models <- 5
+number_of_curves <- length(unique(d_filtered$strain.date))
+pb <- progress::progress_bar$new(total = number_of_curves * number_of_models,
+                                 clear = T,
+                                 format = "[:bar] :percent :elapsedfull")
+
+set.seed(711)
+# Fit models
+
+d_fits <- d_filtered %>%
+  nest(data = c(temp, rate)) %>%
+  mutate(
+    sharpeschoolhigh = map(data, ~ {
+      start_vals <- get_start_vals(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      lower_lims <- get_lower_lims(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      upper_lims <- get_upper_lims(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      
+      nls_multstart_progress(
+        rate ~ sharpeschoolhigh_1981(temp = temp, r_tref, e, eh, th, tref = 20),
+        data = .x,
+        iter = c(3, 3, 3, 3),
+        start_lower = pmax(start_vals - 1, lower_lims),
+        start_upper = pmin(start_vals + 1, upper_lims),
+        lower = lower_lims,
+        upper = upper_lims,
+        supp_errors = 'Y',
+        convergence_count = FALSE
+      )
+    }),
+    sharpeschoolfull = map(data, ~ {
+      start_vals <- get_start_vals(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      lower_lims <- get_lower_lims(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      upper_lims <- get_upper_lims(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      nls_multstart_progress(
+        rate ~ sharpeschoolfull_1981(temp = temp, r_tref, e, el, tl, eh, th, tref = 20),
+        data = .x,
+        iter = rep(3, 6),
+        start_lower = pmax(start_vals - 1, lower_lims),
+        start_upper = pmin(start_vals + 1, upper_lims),
+        lower = lower_lims,
+        upper = upper_lims,
+        supp_errors = 'Y',
+        convergence_count = FALSE
+      )
+    }),
+    pawar = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, model_name = "pawar_2018")
+      ll <- get_lower_lims(.x$temp, .x$rate, model_name = "pawar_2018")
+      ul <- get_upper_lims(.x$temp, .x$rate, model_name = "pawar_2018")
+      nls_multstart_progress(
+        rate ~ pawar_2018(temp = temp, r_tref, e, eh, th, tref = 20),
+        data        = .x,
+        iter        = rep(3, length(sv)),
+        start_lower = sv - 5,
+        start_upper = sv + 5,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    }),
+    johnsonlewin   = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, "johnsonlewin_1946")
+      ll <- get_lower_lims(.x$temp, .x$rate, "johnsonlewin_1946")
+      ul <- get_upper_lims(.x$temp, .x$rate, "johnsonlewin_1946")
+      nls_multstart_progress(
+        rate ~ johnsonlewin_1946(temp = temp, r0, e ,eh, topt),
+        data        = .x,
+        iter        = rep(4, length(sv)),
+        start_lower = sv - 2,
+        start_upper = sv + 2,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    }),
+      weibull        = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, "weibull_1995")
+      ll <- get_lower_lims(.x$temp, .x$rate, "weibull_1995")
+      ul <- get_upper_lims(.x$temp, .x$rate, "weibull_1995")
+      nls_multstart_progress(
+        rate ~ weibull_1995(temp = temp, a, topt, b, c),
+        data        = .x,
+        iter        = rep(4, length(sv)),
+        start_lower = sv - 1,
+        start_upper = sv + 1,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    })
+  )
+
+
+
+error_rows <- d_fits %>%
+  filter(
+    map_lgl(sharpeschoolhigh, is.null) |
+    map_lgl(sharpeschoolfull,   is.null) |
+    map_lgl(pawar,          is.null) |
+    map_lgl(johnsonlewin,          is.null) |
+    map_lgl(weibull,          is.null) #|
+    #map_lgl(briere2,          is.null)
+    )
+
+successful_fits <- d_fits %>%
+  filter(
+    !map_lgl(sharpeschoolhigh, is.null) |
+    !map_lgl(sharpeschoolfull,   is.null) |
+    !map_lgl(pawar,          is.null) |
+    !map_lgl(johnsonlewin,          is.null) |
+    !map_lgl(weibull,          is.null)
+    )
+
+# Print summary of errors
+print("Rows with fitting errors:")
+print(error_rows)
+
+
+
+# 1. Pivot to long: one row per strain × model
+d_long <- successful_fits %>%
+  pivot_longer(
+    cols      = sharpeschoolhigh:weibull,     # or your five model columns
+    names_to  = "model",
+    values_to = "fit"
+  ) %>%
+  filter(!map_lgl(fit, is.null))             # drop failed fits
+
+# 2. Compute AIC, AICc, BIC, sigma, df.resid
+d_stats <- d_long %>%
+  mutate(
+    # glance() gives AIC, BIC, sigma, df.resid, etc.
+    glance = map(fit, broom::glance),
+    AICc   = map_dbl(fit, MuMIn::AICc)
+  ) %>%
+  unnest(glance) %>%
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = FALSE       # keep the original strain.date if you still need it
+  ) %>%
+  select(strain, strain.date, model, AIC, AICc, BIC, sigma, df.residual)
+
+# 3. Within each strain, compute ΔAICc and Akaike weight
+d_compare <- d_stats %>%
+  group_by(strain.date) %>%
+  mutate(
+    delta  = AICc - min(AICc),
+    weight = exp(-0.5 * delta) / sum(exp(-0.5 * delta))
+  ) %>%
+  arrange(strain, delta) %>%
+  ungroup()
+
+# 4a. “Best” model per strain
+best_by_strain <- d_compare %>%
+  filter(delta == 0) %>%
+  select(strain, strain.date, best_model = model, AICc, weight)
+
+overall <- d_compare %>%
+  group_by(model) %>%
+  summarise(
+    prop_best   = mean(delta == 0),
+    mean_weight = mean(weight)
+  ) %>%
+  arrange(desc(prop_best), desc(mean_weight))
+
+print(overall)
+
+# 4b. (Optional) Full model‐averaged prediction or parameters
+#    You can join `weight` back onto your predictions or 
+#    onto rTPC::calc_params() output and take weighted averages.
+
+# === Examples of exploring the results ===
+
+# How many strains picked each model?
+best_by_strain %>% count(best_model)
+
+
+# 1. See exactly which rows are infinite
+d_compare %>% 
+  filter(!is.finite(AICc)) %>% 
+  count(model) %>% 
+  arrange(desc(n))
+
+# Peek at means
+d_compare %>% 
+  filter(is.finite(AICc)) |>
+  group_by(model) |>
+  summarise(mean = mean(AICc, na.rm = T),
+            sd   = sd(AICc, na.rm = T),
+            n    = n())
+
+hist(d_compare$delta[d_compare$model == "sharpeschoolfull"], breaks = 100)
+
+# Visualize ΔAICc distributions
+ggplot(d_compare, aes(model, delta)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = expression(Delta~AIC[c]), x = NULL)
+
+hist(d_compare$AICc[d_compare$model == "sharpeschoolfull"])
+
+# Visualize AICc distributions
+ggplot(d_compare, aes(model, AICc)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = "AICc", x = NULL)
+
+# -----------------------------------------------------------------------------
+# 2. Compute fit statistics & Akaike weights
+# -----------------------------------------------------------------------------
+d_stats <- d_stats %>%
+  group_by(strain.date) %>%
+  mutate(
+    delta  = AICc - min(AICc),
+    weight = exp(-0.5 * delta) / sum(exp(-0.5 * delta))
+  ) %>%
+  arrange(strain, delta) %>%
+  ungroup()
+
+
+best_by_strain <- d_stats %>%
+  filter(delta == 0) %>%
+  select(strain, strain.date, best_model = model, best_AICc = AICc)
+
+# -----------------------------------------------------------------------------
+# 3. Extract TPC trait parameters and do model-averaging vs best-model
+# -----------------------------------------------------------------------------
+
+params_long <- d_long %>%
+  mutate(params = map(fit, calc_params, .progress = T)) %>%
+  select(strain.date, model, params) %>%
+  unnest(params) |>
+  pivot_longer(
+    cols      = c(rmax, topt, ctmin, ctmax, e, eh, q10,
+                  thermal_safety_margin, thermal_tolerance,
+                  breadth, skewness),
+    names_to  = "term",
+    values_to = "estimate"
+  )
+
+params_long_k <- params_long |>
+  filter(model == "sharpeschoolfull") |>
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # remove the original strain.date
+  ) |>
+  filter(date != "2024-01-14") |>
+  rename(estimate_K = estimate)
+  
+  
+
+
+# 4a) build per-strain prediction grids
+pred_grids <- d_long %>%
+  select(strain.date, data) %>%
+  distinct() %>%
+  mutate(
+    newdata = map(data, ~ tibble(
+      temp = seq(min(.x$temp), max(.x$temp), length.out = 50)
+    ))
+  ) %>%
+  select(-data)
+
+
+# 1. Get in‐sample predictions for each (strain × model)
+pred_obs <- d_long %>% 
+  # d_long has columns: strain, model, data (the original tibble), fit
+  mutate(
+    obs = map2(fit, data, ~ augment(.x, newdata = .y), .progress = T)
+  ) %>%
+  select(strain.date, model, obs) %>%
+  unnest(obs) %>%
+  # columns now include: strain, model, temp, rate (observed), .fitted
+  left_join(
+    d_stats %>% select(strain.date, model, weight),
+    by = c("strain.date","model")
+  )
+
+# 4b) augment each fit
+d_preds <- d_long %>%
+  left_join(pred_grids, by = "strain.date") %>%
+  mutate(preds = map2(fit, newdata, ~ augment(.x, newdata = .y), .progress = T)) %>%
+  select(strain.date, model, preds) %>%
+  unnest(preds)
+
+# 4e) extract best‐model prediction
+best_preds <- d_preds %>%
+  filter(model == "sharpeschoolfull") %>%
+  select(strain.date, temp, best_fitted = .fitted) |>
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = FALSE       # keep the original strain.date if you still need it
+  ) %>%
+  # (optionally) turn your date string into a real Date
+  mutate(
+    date = as.Date(date)
+  )
+
+## join clade info and original observations
+
+preds <- merge(best_preds, clade_info,
+               by.x = "strain", by.y = "StrainID", all.x = T) |>
+  filter(!is.na(subclade))
+
+d_filtered_wmd <- merge(d_filtered |> separate(
+                                col    = strain.date,
+                                into   = c("strain","date"),
+                                sep    = "\\.",      # split on dot
+                                extra  = "merge",    # if there are more dots, merge them into the last column
+                                remove = FALSE),     # keep the original strain.date if you still need it
+                        clade_info |> select(-subclade),
+                        by.x = "strain", by.y = "StrainID", all.x = T
+                        ) |>
+  left_join(d |> select(strain,
+                        date,
+                        temp,
+                        k_sd),
+            by = c("strain", "date", "temp")) |>
+  filter(!is.na(subclade))
+
+
+## plot curves
+temp_curve_k <- preds %>%
+  ggplot(aes(x = temp,
+                    color = strain,
+                    group = strain.date,
+                    y = best_fitted)) +
+  scale_color_manual(values = strain_subclade_col, guide = "none") +
+  geom_line(alpha = 1, linewidth = 2) +
+  geom_point(data = d_filtered_wmd,
+             aes(temp, rate, color = strain, shape = date), alpha = 0.75, size = 5) +
+  scale_shape_discrete(name = "Date") +
+  #geom_smooth(aes(fill = strain)) +
+  #scale_fill_manual(values = strain_clade_col) +
+  geom_errorbar(data = d_filtered_wmd,
+                  aes(x = temp, ymin = rate-k_sd, ymax = rate+k_sd, color = strain),
+                  width = .4, inherit.aes = F, alpha = 0.65) +
+  scale_x_continuous(breaks = sort(unique(all.data$Temp))) +
+  ggh4x::facet_nested_wrap(.~strain, ncol = 4) +
+  ylim(0, 1) +
+  #labs(title = paste("Subclade", subcld, "(page", i, "of", length(strain_chunks), ")")
+  #     #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))
+  #     ) +
+  ylab(substitute(paste("Max. yield (", italic("K"),") (OD)"))) +
+  xlab("Temperature (ºC)") +
+  apatheme +
+  theme(
+        panel.grid.major.x = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.major.y = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.minor   = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        legend.position    = "bottom",
+        legend.box         = "horizontal",
+        axis.text.y = element_text(size = 20),
+        strip.background = element_blank(),
+        text = element_text(size = 35),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 24 ),
+        plot.subtitle = element_text(color = "black", size = 16))
+    
+  print(temp_curve_k)
+  
+  ggsave(
+      filename = "plots/temp_curves/temp_curves_K_strains4A.png",
+      plot     = temp_curve_k,
+      width    = 600,
+      height   = 350,
+      units    = "mm",
+      dpi      = 300
+    )
+  
+
+```
+
+```{r fit temperature curves, message=FALSE, warning=FALSE, echo=FALSE}
+# Filter out strains with too many zero values
+d_filtered <- d %>%
+  group_by(strain, date) %>%
+  filter(sum(rate == 0) / n() < 0.5) %>% # Remove strains with 25% or more zero values
+  ungroup() |>
+  mutate(strain.date = paste(strain, date, sep = ".")) |>
+  select(-c(#strain, date,
+            r_sd, k_mean, k_sd)) |>
+  relocate(strain.date, .before = 1)
+
+# Filter out strains with too many zero values and keep them for later analysis
+d_filtered_out <- d %>%
+  group_by(strain, date) %>%
+  filter(sum(rate == 0) / n() > 0.5) %>% # Remove strains with 25% or more zero values
+  ungroup()
+
+length(unique(d_filtered$strain.date))
+
+# Vector of all strains
+all_strains      <- unique(d$strain)
+# Vector of those that passed
+kept_strains     <- unique(d_filtered$strain)
+# Those that were dropped
+removed_strains2 <- setdiff(all_strains, kept_strains)
+
+
+# Set up progress bar
+number_of_models <- 5
+number_of_curves <- length(unique(d_filtered$strain.date))
+pb <- progress::progress_bar$new(total = number_of_curves * number_of_models,
+                                 clear = T,
+                                 format = "[:bar] :percent :elapsedfull")
+
+set.seed(711)
+# Fit models
+
+d_fits <- d_filtered %>%
+  nest(data = c(temp, rate)) %>%
+  mutate(
+    sharpeschoolhigh = map(data, ~ {
+      start_vals <- get_start_vals(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      lower_lims <- get_lower_lims(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      upper_lims <- get_upper_lims(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      
+      nls_multstart_progress(
+        rate ~ sharpeschoolhigh_1981(temp = temp, r_tref, e, eh, th, tref = 20),
+        data = .x,
+        iter = c(3, 3, 3, 3),
+        start_lower = pmax(start_vals - 1, lower_lims),
+        start_upper = pmin(start_vals + 1, upper_lims),
+        lower = lower_lims,
+        upper = upper_lims,
+        supp_errors = 'Y',
+        convergence_count = FALSE
+      )
+    }),
+    sharpeschoolfull = map(data, ~ {
+      start_vals <- get_start_vals(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      lower_lims <- get_lower_lims(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      upper_lims <- get_upper_lims(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      nls_multstart_progress(
+        rate ~ sharpeschoolfull_1981(temp = temp, r_tref, e, el, tl, eh, th, tref = 20),
+        data = .x,
+        iter = rep(3, 6),
+        start_lower = pmax(start_vals - 1, lower_lims),
+        start_upper = pmin(start_vals + 1, upper_lims),
+        lower = lower_lims,
+        upper = upper_lims,
+        supp_errors = 'Y',
+        convergence_count = FALSE
+      )
+    }),
+    pawar = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, model_name = "pawar_2018")
+      ll <- get_lower_lims(.x$temp, .x$rate, model_name = "pawar_2018")
+      ul <- get_upper_lims(.x$temp, .x$rate, model_name = "pawar_2018")
+      nls_multstart_progress(
+        rate ~ pawar_2018(temp = temp, r_tref, e, eh, th, tref = 20),
+        data        = .x,
+        iter        = rep(3, length(sv)),
+        start_lower = sv - 5,
+        start_upper = sv + 5,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    }),
+    johnsonlewin   = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, "johnsonlewin_1946")
+      ll <- get_lower_lims(.x$temp, .x$rate, "johnsonlewin_1946")
+      ul <- get_upper_lims(.x$temp, .x$rate, "johnsonlewin_1946")
+      nls_multstart_progress(
+        rate ~ johnsonlewin_1946(temp = temp, r0, e ,eh, topt),
+        data        = .x,
+        iter        = rep(4, length(sv)),
+        start_lower = sv - 2,
+        start_upper = sv + 2,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    }),
+      weibull        = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, "weibull_1995")
+      ll <- get_lower_lims(.x$temp, .x$rate, "weibull_1995")
+      ul <- get_upper_lims(.x$temp, .x$rate, "weibull_1995")
+      nls_multstart_progress(
+        rate ~ weibull_1995(temp = temp, a, topt, b, c),
+        data        = .x,
+        iter        = rep(4, length(sv)),
+        start_lower = sv - 1,
+        start_upper = sv + 1,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    })
+  )
+
+
+
+error_rows <- d_fits %>%
+  filter(
+    map_lgl(sharpeschoolhigh, is.null) |
+    map_lgl(sharpeschoolfull,   is.null) |
+    map_lgl(pawar,          is.null) |
+    map_lgl(johnsonlewin,          is.null) |
+    map_lgl(weibull,          is.null) #|
+    #map_lgl(briere2,          is.null)
+    )
+
+successful_fits <- d_fits %>%
+  filter(
+    !map_lgl(sharpeschoolhigh, is.null) |
+    !map_lgl(sharpeschoolfull,   is.null) |
+    !map_lgl(pawar,          is.null) |
+    !map_lgl(johnsonlewin,          is.null) |
+    !map_lgl(weibull,          is.null)
+    )
+
+# Print summary of errors
+print("Rows with fitting errors:")
+print(error_rows)
+```
+
+```{r fitted temperature curves analysis, message=FALSE, warning=FALSE, echo=FALSE}
+# 1. Pivot to long: one row per strain × model
+d_long <- successful_fits %>%
+  pivot_longer(
+    cols      = sharpeschoolhigh:weibull,     # or your five model columns
+    names_to  = "model",
+    values_to = "fit"
+  ) %>%
+  filter(!map_lgl(fit, is.null))             # drop failed fits
+
+# 2. Compute AIC, AICc, BIC, sigma, df.resid
+d_stats <- d_long %>%
+  mutate(
+    # glance() gives AIC, BIC, sigma, df.resid, etc.
+    glance = map(fit, broom::glance),
+    AICc   = map_dbl(fit, MuMIn::AICc)
+  ) %>%
+  unnest(glance) %>%
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = FALSE       # keep the original strain.date if you still need it
+  ) %>%
+  select(strain, strain.date, model, AIC, AICc, BIC, sigma, df.residual)
+
+# 3. Within each strain, compute ΔAICc and Akaike weight
+d_compare <- d_stats %>%
+  group_by(strain.date) %>%
+  mutate(
+    delta  = AICc - min(AICc),
+    weight = exp(-0.5 * delta) / sum(exp(-0.5 * delta))
+  ) %>%
+  arrange(strain, delta) %>%
+  ungroup()
+
+# 4a. “Best” model per strain
+best_by_strain <- d_compare %>%
+  filter(delta == 0) %>%
+  select(strain, strain.date, best_model = model, AICc, weight)
+
+overall <- d_compare %>%
+  group_by(model) %>%
+  summarise(
+    prop_best   = mean(delta == 0),
+    mean_weight = mean(weight)
+  ) %>%
+  arrange(desc(prop_best), desc(mean_weight))
+
+print(overall)
+
+# 4b. (Optional) Full model‐averaged prediction or parameters
+#    You can join `weight` back onto your predictions or 
+#    onto rTPC::calc_params() output and take weighted averages.
+
+# === Examples of exploring the results ===
+
+# How many strains picked each model?
+best_by_strain %>%
+  count(best_model) |>
+  mutate(percent = (n/sum(n))*100)
+
+
+# 1. See exactly which rows are infinite
+d_compare %>% 
+  filter(!is.finite(AICc)) %>% 
+  count(model) %>% 
+  arrange(desc(n))
+
+# Peek at means
+d_compare %>% 
+  filter(is.finite(AICc)) |>
+  group_by(model) |>
+  summarise(mean = mean(AICc, na.rm = T),
+            sd   = sd(AICc, na.rm = T),
+            n    = n())
+
+hist(d_compare$delta[d_compare$model == "sharpeschoolfull"], breaks = 100)
+
+# Visualize ΔAICc distributions
+ggplot(d_compare, aes(model, delta)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = expression(Delta~AIC[c]), x = NULL)
+
+hist(d_compare$AICc[d_compare$model == "sharpeschoolfull"])
+
+# Visualize AICc distributions
+ggplot(d_compare, aes(model, AICc)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = "AICc", x = NULL)
+```
+
+After testing the different models "Sharpescholfull" is the overall best
+model so we will use that to fit all curves.
+
+#### Calculate curve parameters
+
+```{r model-avg-params-and-preds 0, message=FALSE, warning=FALSE, echo=FALSE}
+# -----------------------------------------------------------------------------
+# 2. Compute fit statistics & Akaike weights
+# -----------------------------------------------------------------------------
+d_stats <- d_stats %>%
+  group_by(strain.date) %>%
+  mutate(
+    delta  = AICc - min(AICc),
+    weight = exp(-0.5 * delta) / sum(exp(-0.5 * delta))
+  ) %>%
+  arrange(strain, delta) %>%
+  ungroup()
+
+
+best_by_strain <- d_stats %>%
+  filter(delta == 0) %>%
+  select(strain, strain.date, best_model = model, best_AICc = AICc)
+
+# -----------------------------------------------------------------------------
+# 3. Extract TPC trait parameters and do model-averaging vs best-model
+# -----------------------------------------------------------------------------
+
+params_long <- d_long %>%
+  mutate(params = map(fit, calc_params, .progress = T)) %>%
+  select(strain.date, model, params) %>%
+  unnest(params) |>
+  pivot_longer(
+    cols      = c(rmax, topt, ctmin, ctmax, e, eh, q10,
+                  thermal_safety_margin, thermal_tolerance,
+                  breadth, skewness),
+    names_to  = "term",
+    values_to = "estimate"
+  )
+# → columns: strain, model, term, estimate
+
+### subset parameters for Alejandra
+
+params_long_4A <- params_long |>
+  filter(model == "sharpeschoolfull") |>
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # remove the original strain.date
+  ) |>
+  filter(date != "2024-01-14" &
+           strain %in% c("Grass-54",
+                        "Grass-40",
+                        "Grass-44",
+                        "Grass-45",
+                        "Grass-57",
+                        "Grass-31",
+                        "Grass-42",
+                        "Grass-43",
+                        "Mmlr14-002",
+                        "Grass-36")) |>
+  rename(estimate_r = estimate)
+
+
+### merge r and K parameters into a single table for Alejandra
+
+merged_params4A <- params_long_4A |>
+  left_join(params_long_k, by = c("strain", "date", "model", "term"))
+
+write.table(merged_params4A,
+            file = "tables/curve_params_selected_strains.txt",
+            row.names = F,
+            col.names = T,
+            quote = F,
+            sep = "\t")
+
+
+avg_params <- params_long %>%
+  left_join(
+    d_stats %>% select(strain, strain.date, model, weight),
+    by = c("strain.date", "model")
+  ) %>%
+  group_by(strain.date, term) %>%
+  summarise(
+    avg_estimate = sum(estimate * weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+best_params <- params_long %>%
+  inner_join(
+    best_by_strain %>% select(strain.date, strain, best_model),
+    by = "strain.date"
+  ) %>%
+  filter(model == best_model) %>%
+  select(strain.date, term, best_estimate = estimate)
+
+# 4. Join for comparison
+compare_params <- avg_params %>%
+  inner_join(best_params, by = c("strain.date", "term")) %>%
+  mutate(diff = avg_estimate - best_estimate)
+
+# -----------------------------------------------------------------------------
+# 4. Generate predictions on a fine grid and model-average vs best-model
+# -----------------------------------------------------------------------------
+# 4a) build per-strain prediction grids
+pred_grids <- d_long %>%
+  select(strain.date, data) %>%
+  distinct() %>%
+  mutate(
+    newdata = map(data, ~ tibble(
+      temp = seq(min(.x$temp), max(.x$temp), length.out = 50)
+    ))
+  ) %>%
+  select(-data)
+```
+
+```{r calculate predictions and compare, warning=FALSE, message=FALSE, echo=FALSE}
+
+# 1. Get in‐sample predictions for each (strain × model)
+pred_obs <- d_long %>% 
+  # d_long has columns: strain, model, data (the original tibble), fit
+  mutate(
+    obs = map2(fit, data, ~ augment(.x, newdata = .y), .progress = T)
+  ) %>%
+  select(strain.date, model, obs) %>%
+  unnest(obs) %>%
+  # columns now include: strain, model, temp, rate (observed), .fitted
+  left_join(
+    d_stats %>% select(strain.date, model, weight),
+    by = c("strain.date","model")
+  )
+
+# 2. Compute the weighted‐average prediction at each (strain, temp)
+avg_pred_obs <- pred_obs %>%
+  group_by(strain.date, temp, rate) %>%
+  summarise(
+    avg_pred = sum(.fitted * weight),
+    .groups = "drop"
+  )
+
+# 3. Extract the sharpeschoolhigh predictions
+sh_pred_obs <- pred_obs %>%
+  filter(model == "sharpeschoolfull") %>%
+  select(strain.date, temp, rate, sh_pred = .fitted)
+
+pw_pred_obs <- pred_obs %>%
+  filter(model == "sharpeschoolhigh") %>%
+  select(strain.date, temp, rate, pw_pred = .fitted)
+
+# 4. Join them together and compute RMSE
+rmse_cmp <- pw_pred_obs %>%
+  inner_join(sh_pred_obs, by = c("strain.date","temp","rate")) %>%
+  group_by(strain.date) %>%
+  summarise(
+    rmse_pw = sqrt(mean((pw_pred - rate)^2)),
+    rmse_sh  = sqrt(mean((sh_pred  - rate)^2))
+  ) %>%
+  ungroup()
+
+# 5. Inspect or plot
+print(rmse_cmp)
+
+# e.g. plot rmse_avg vs rmse_sh
+ggplot(rmse_cmp, aes(rmse_sh, rmse_pw)) +
+  geom_abline(lty = 2) +
+  geom_point() +
+  labs(
+    x = "RMSE: Sharpe–Schoolfield Full",
+    y = "RMSE: Sharpe–Schoolfield High",
+    title = "Predictive RMSE by Strain"
+  ) +
+  theme_minimal()
+
+
+# 4. Join them together and compute RMSE
+rmse_cmp <- avg_pred_obs %>%
+  inner_join(sh_pred_obs, by = c("strain.date","temp","rate")) %>%
+  group_by(strain.date) %>%
+  summarise(
+    rmse_avg = sqrt(mean((avg_pred - rate)^2)),
+    rmse_sh  = sqrt(mean((sh_pred  - rate)^2))
+  ) %>%
+  ungroup()
+
+# 5. Inspect or plot
+print(rmse_cmp)
+
+# e.g. plot rmse_avg vs rmse_sh
+ggplot(rmse_cmp, aes(rmse_sh, rmse_avg)) +
+  geom_abline(lty = 2) +
+  geom_point() +
+  labs(
+    x = "RMSE: Sharpe–Schoolfield",
+    y = "RMSE: Model-averaged",
+    title = "Predictive RMSE by Strain"
+  ) +
+  theme_minimal()
+```
+
+```{r model-avg-params-and-preds, message=FALSE, warning=FALSE, echo=FALSE}
+# 4b) augment each fit
+d_preds <- d_long %>%
+  left_join(pred_grids, by = "strain.date") %>%
+  mutate(preds = map2(fit, newdata, ~ augment(.x, newdata = .y), .progress = T)) %>%
+  select(strain.date, model, preds) %>%
+  unnest(preds)
+
+# 4c) join weights and best‐model info
+d_preds <- d_preds %>%
+  left_join(d_stats %>% select(strain, strain.date, model, weight), by = c("strain.date","model")) %>%
+  left_join(best_by_strain, by = "strain.date")
+
+# 4e) extract best‐model prediction
+best_preds <- d_preds %>%
+  filter(model == "sharpeschoolfull") %>%
+  select(strain.date, temp, best_fitted = .fitted) |>
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = FALSE       # keep the original strain.date if you still need it
+  ) %>%
+  # (optionally) turn your date string into a real Date
+  mutate(
+    date = as.Date(date)
+  )
+
+# -----------------------------------------------------------------------------
+# Now you have:
+# - compare_params: per‐strain, per‐trait avg vs best
+# - avg_preds & best_preds: per‐strain fitted curves
+# -----------------------------------------------------------------------------
+```
+
+### Plot predictions and observations
+
+```{r preds, message=FALSE, warning=FALSE, echo=FALSE}
+
+preds <- merge(best_preds, clade_info,
+               by.x = "strain", by.y = "StrainID", all.x = T) |>
+  filter(!is.na(subclade))
+
+d_filtered_wmd <- merge(d_filtered |> separate(
+                                col    = strain.date,
+                                into   = c("strain","date"),
+                                sep    = "\\.",      # split on dot
+                                extra  = "merge",    # if there are more dots, merge them into the last column
+                                remove = FALSE),     # keep the original strain.date if you still need it
+                        clade_info,
+                        by.x = "strain", by.y = "StrainID", all.x = T
+                        ) |>
+  left_join(d |> select(strain,
+                        date,
+                        temp,
+                        r_sd),
+            by = c("strain", "date", "temp")) |>
+  filter(!is.na(subclade))
+
+```
+
+We can then plot the predictions of each curve using **ggplot2**.
+
+```{r plot fitted thermal curves, fig.height = 12, fig.width=8, message=FALSE, warning=FALSE, echo=FALSE}
+
+
+plot_temp_curves <- function(
+  preds,
+  observed = observed,
+  all_data,
+  strain_cols,
+  subclades      = NULL,
+  facet_by_clade = TRUE,
+  nrow           = 1,
+  ylim_max       = 1,
+  width_mm       = 600,
+  height_mm      = 100,
+  units          = "mm",
+  dpi            = 300,
+  filename       = NULL
+) {
+  # filter by subclade if requested
+  if(!is.null(subclades)){
+    preds     <- preds     %>% filter(subclade %in% subclades)
+    observed  <- observed  %>% filter(subclade %in% subclades)
+  }
+
+  temps <- sort(unique(all.data$Temp))
+  
+  temp_curve <- preds %>%
+    filter(date != "2024-01-14") |> 
+    ggplot(aes(x = temp,
+                      color = strain,
+                      group = strain.date,
+                      y = best_fitted)) +
+    scale_color_manual(values = strain_subclade_col) +
+    geom_line(alpha = 0.65, linewidth = 0.75) +
+    #geom_smooth(aes(fill = strain)) +
+    #scale_fill_manual(values = strain_clade_col) +
+    geom_point(data = observed |> filter(date != "2024-01-14"),
+               aes(temp, rate, color = strain), alpha = 0.6) +
+    #geom_errorbar(data = observed |> filter(date != "2024-01-14"),
+    #              aes(x = temp, ymin = rate-r_sd, ymax = rate+r_sd, color = strain),
+    #              width = .2, inherit.aes = F, alpha = 0.65) +
+    scale_x_continuous(breaks = temps) +
+    ylim(0, 1) +
+    #labs(title = "Temperature performance",
+         #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))) +
+    ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
+    xlab("Temperature (ºC)") +
+    apatheme +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+          axis.text.y = element_text(size = 20),
+          strip.background = element_blank(),
+          text = element_text(size = 20),
+          #strip.text.x = element_blank(),
+          plot.title = element_text(color = "black", size = 18),
+          plot.subtitle = element_text(color = "black", size = 16),
+          legend.position = "none")
+  
+  if(facet_by_clade) {
+  temp_curve <- temp_curve +
+    ggh4x::facet_nested_wrap(.~clade + subclade, nrow = nrow)
+  } else {
+    temp_curve <- temp_curve +
+      facet_wrap(.~ subclade, nrow = nrow)
+  }
+  
+  print(temp_curve )
+  
+  if(!is.null(filename)){
+  ggsave(
+         filename = filename,
+         plot     = temp_curve,
+         width    = width_mm,
+         height   = height_mm,
+         units    = units,
+         dpi      = dpi
+      )
+  }
+  invisible(temp_curve)
+}
+ ## plot top subclades
+plot_temp_curves(
+  preds          = preds,
+  observed       = d_filtered_wmd,
+  all_data       = all.data,
+  strain_cols    = strain_subclade_col,
+  subclades      = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
+  facet_by_clade = FALSE,
+  filename       = "plots/temp_curves_topSubclades.png",
+  nrow           = 1,
+  width_mm       = 300,
+  height_mm      = 75
+)
+
+ ## plot all subclades
+plot_temp_curves(
+  preds          = preds,
+  observed       = d_filtered_wmd,
+  all_data       = all.data,
+  strain_cols    = strain_subclade_col,
+  subclades      = NULL,
+  facet_by_clade = T,
+  filename       = "plots/temp_curves.png",
+  nrow           = 1
+)
+
+
+  correct_order <- c(
+  "IA", "IB", "IC",
+  "IIA", "IIB", "IIC", "IID", "IIE", "IIF", "IIG", "IIH", "IIJ", "IIK",
+  "IIIA", "IIIB", "IIIC", "IIID", "IIIE", "IIIF",
+  "IVA", "IVB", "IVC", "IVD", "IVE",
+  "VA"
+)
+
+preds <- preds |> mutate(subclade = factor(subclade, levels = correct_order))
+
+
+for (subcld in c("IA", "IB", "IC",
+                 "IIE", "IIG", "IIJ",
+  "IIIA", "IIIB", "IIID", "IIIE",
+  "IIIF",
+  "IVA", "IVB", "IVC", "IVE", NA)) {
+  
+   # get all strains in this subclade
+  all_strains <- preds %>%
+    filter(subclade == subcld) %>%
+    pull(strain) %>%
+    unique() %>%
+    sort()
+  
+   # split into chunks of up to 20
+  strain_chunks <- split(all_strains, 
+                         ceiling(seq_along(all_strains) / 20))
+  
+  # loop over each chunk (page)
+  for (i in seq_along(strain_chunks)) {
+    this_strains <- strain_chunks[[i]]
+    
+    temp_curve <- preds %>%
+      filter(subclade == subcld, strain %in% this_strains) |> 
+  ggplot(aes(x = temp,
+                    color = strain,
+                    group = strain.date,
+                    y = best_fitted)) +
+  scale_color_manual(values = strain_subclade_col, guide = "none") +
+  geom_line(alpha = 1, linewidth = 2) +
+  geom_point(data = d_filtered_wmd %>% filter(subclade == subcld,
+                                              strain %in% this_strains),
+             aes(temp, rate, color = strain, shape = date), alpha = 0.75, size = 5) +
+  scale_shape_discrete(name = "Date") +
+  #geom_smooth(aes(fill = strain)) +
+  #scale_fill_manual(values = strain_clade_col) +
+  geom_errorbar(data = d_filtered_wmd %>% filter(subclade == subcld,
+                                              strain %in% this_strains),
+                  aes(x = temp, ymin = rate-r_sd, ymax = rate+r_sd, color = strain),
+                  width = .4, inherit.aes = F, alpha = 0.65) +
+  scale_x_continuous(breaks = sort(unique(all.data$Temp))) +
+  ggh4x::facet_nested_wrap(.~strain, ncol = 4) +
+  ylim(0, 1) +
+  labs(title = paste("Subclade", subcld, "(page", i, "of", length(strain_chunks), ")")
+       #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))
+       ) +
+  ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
+  xlab("Temperature (ºC)") +
+  apatheme +
+  theme(
+        panel.grid.major.x = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.major.y = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.minor   = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        legend.position    = "bottom",
+        legend.box         = "horizontal",
+        axis.text.y = element_text(size = 20),
+        strip.background = element_blank(),
+        text = element_text(size = 35),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 24 ),
+        plot.subtitle = element_text(color = "black", size = 16))
+    
+  print(temp_curve)
+  
+  # now save it
+    fn <- sprintf("plots/temp_curves/temp_curves_%s_page%02d.png", subcld, i)
+    ggsave(
+      filename = fn,
+      plot     = temp_curve,
+      width    = 600,
+      height   = 350,
+      units    = "mm",
+      dpi      = 300
+    )
+  }
+}
+
+
+temp_curve_s4A <- preds %>%
+      filter(strain %in% c("Grass-54",
+                        "Grass-40",
+                        "Grass-44",
+                        "Grass-45",
+                        "Grass-57",
+                        "Grass-31",
+                        "Grass-42",
+                        "Grass-43",
+                        "Mmlr14-002",
+                        "Grass-36")) |> 
+  ggplot(aes(x = temp,
+                    color = strain,
+                    group = strain.date,
+                    y = best_fitted)) +
+  scale_color_manual(values = strain_subclade_col, guide = "none") +
+  geom_line(alpha = 1, linewidth = 2) +
+  geom_point(data = d_filtered_wmd %>% filter(strain %in% c("Grass-54",
+                        "Grass-40",
+                        "Grass-44",
+                        "Grass-45",
+                        "Grass-57",
+                        "Grass-31",
+                        "Grass-42",
+                        "Grass-43",
+                        "Mmlr14-002",
+                        "Grass-36")),
+             aes(temp, rate, color = strain, shape = date), alpha = 0.75, size = 5) +
+  scale_shape_discrete(name = "Date") +
+  #geom_smooth(aes(fill = strain)) +
+  #scale_fill_manual(values = strain_clade_col) +
+  geom_errorbar(data = d_filtered_wmd %>% filter(strain %in% c("Grass-54",
+                        "Grass-40",
+                        "Grass-44",
+                        "Grass-45",
+                        "Grass-57",
+                        "Grass-31",
+                        "Grass-42",
+                        "Grass-43",
+                        "Mmlr14-002",
+                        "Grass-36")),
+                  aes(x = temp, ymin = rate-r_sd, ymax = rate+r_sd, color = strain),
+                  width = .4, inherit.aes = F, alpha = 0.65) +
+  scale_x_continuous(breaks = sort(unique(all.data$Temp))) +
+  ggh4x::facet_nested_wrap(.~strain, ncol = 4) +
+  ylim(0, 1) +
+  #labs(title = paste("Subclade", subcld, "(page", i, "of", length(strain_chunks), ")")
+       #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))
+   #    ) +
+  ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
+  xlab("Temperature (ºC)") +
+  apatheme +
+  theme(
+        panel.grid.major.x = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.major.y = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.minor   = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        legend.position    = "bottom",
+        legend.box         = "horizontal",
+        axis.text.y = element_text(size = 20),
+        strip.background = element_blank(),
+        text = element_text(size = 35),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 24 ),
+        plot.subtitle = element_text(color = "black", size = 16))
+    
+  print(temp_curve_s4A)
+  
+  # now save it
+
+    ggsave(
+      filename = "plots/temp_curves/temp_curves_r_strains4A.png",
+      plot     = temp_curve_s4A,
+      width    = 600,
+      height   = 350,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+    
+    
+    
+preds_avg <- preds |>
+  filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND"))) |>
+  group_by(subclade, temp) |>
+  summarise(avg_r = mean(best_fitted))
+
+
+
+
+
+### first recode subclade IB
+temp_curve_avg <- preds %>%
+    filter(!(
+      (strain == "32G3B09" & date == "2024-03-14") |
+      (strain == "39G1A09" & date == "2024-03-14") |
+      (strain == "39G1A10" & date == "2024-03-14") |
+      (strain == "30G3A10" & date == "2024-04-15") |
+      (strain == "33G2A09" & date == "2024-04-15") |
+      (strain == "35G4A05" & date == "2024-04-15") |
+      (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+      (strain == "28G1A03" & date == "2024-03-14") |
+      (strain == "28G1B05" & date == "2024-03-14") |
+      (strain == "28G4A04" & date == "2024-03-14") |
+      (strain == "35G1A07" & date == "2024-03-14") |
+      (strain == "39G1A08" & date == "2024-03-14") |
+      (strain == "30D10" & date == "2024-03-14") |
+      (strain == "23G1B05" & date == "2024-03-14") |
+      (subclade == "IIIE" & date == "2024-04-15") |
+      (strain == "30G1B03" & date == "2024-03-14") |
+      (strain == "23G1B05" & date == "2024-03-14") |
+      (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+      (strain == "36G2A07" & date == "2024-03-14") |
+      (strain == "36G3B02" & date == "2024-03-14") |
+      (strain == "36G3B05" & date == "2024-03-14") |
+      (strain == "37G4A03" & date == "2024-03-14") |
+      (clade == "UND"))) |>
+      filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) |>
+      ggplot(aes(x = temp,
+                        color = strain,
+                        group = strain.date,
+                        y = best_fitted)) +
+      geom_line(alpha = 0.75, linewidth = 0.15) +
+      scale_color_manual(values = strain_clade_col, guide = "none") +
+      # 2) tell ggplot we want a *new* colour scale
+      ggnewscale::new_scale_color() +
+      geom_smooth(data = preds_avg |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                 aes(temp, avg_r, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = T) + 
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_col) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_col) +
+      #scale_x_continuous(breaks = seq(4,46, 6)) +
+      scale_x_continuous(breaks = c(4, 25, 46)) +
+      ylim(0, 1.1) +
+      facet_wrap(.~ subclade, nrow = 1) +
+      ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+      xlab("Temperature (ºC)") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 7),
+            axis.text.y = element_text(size = 7),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            #strip.text.x = element_blank(),
+            plot.title = element_text(color = "black", size = 18),
+            plot.subtitle = element_text(color = "black", size = 16),
+            legend.position = "none",
+            #legend.position = c(0.95,0.85),
+            #legend.justification = c(1, 1),         # anchor legend’s top-right corner
+    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
+                                        colour = NA),
+    legend.title         = element_text(size = 5),
+    legend.text          = element_text(size = 4),
+    legend.margin        = margin(rep(1,4)))
+print(temp_curve_avg)
+
+
+ggsave(
+      filename = "plots/temp_curves/temp_curves_avg_topSubclades.png",
+      width    = 140,
+      height   = 80,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+
+temp_curve_avg_only <- preds_avg |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IVB")) |> 
+      ggplot() +
+      geom_smooth(
+                 aes(temp, avg_r, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = F) +
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_col) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_col) +
+      #scale_x_continuous(breaks = seq(4,46, 6)) +
+      scale_x_continuous(breaks = seq(4, 46, 6)) +
+      ylim(0, 0.5) +
+      ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+      xlab("Temperature (ºC)") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 6),
+            axis.text.y = element_text(size = 6),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            #strip.text.x = element_blank(),
+            plot.title = element_text(color = "black", size = 18),
+            plot.subtitle = element_text(color = "black", size = 16),
+            legend.position = "none",
+            #legend.position = c(0.95,0.85),
+            #legend.justification = c(1, 1),         # anchor legend’s top-right corner
+    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
+                                        colour = NA),
+    legend.title         = element_text(size = 5),
+    legend.text          = element_text(size = 4),
+    legend.margin        = margin(rep(1,4)))
+print(temp_curve_avg_only)
+
+
+ggsave(
+      filename = "plots/temp_curves/temp_curves_avgOnly_topSubclades.png",
+      width    = 80,
+      height   = 80,
+      units    = "mm",
+      dpi      = 300
+    )
+  
+```
+
+###### plot for grant
+
+Here we will plot all clade I curves in the back ground and highlight
+only one curve per subclade, we also need to recode subclade IB into IBa
+and IBb, so we have 4 subclades in clade I
+
+**- Subclade IBa** - 28G4A10 - 35D02 - 35D04
+
+**- Subclade IBb** - Pine-20 - 32G4B12
+
+```{r quick figure for a grant, include=FALSE, echo=FALSE, warning=FALSE}
+# we need to update (sub)clade info and colors
+ clade_info_upd <- clade_info |>
+  mutate(subclade = case_when(StrainID %in% c("28G4A10", "35D02", "35D04") ~ "IBa",
+                              StrainID %in% c("Pine-20", "32G4B12") ~ "IBb",
+                              TRUE ~ subclade))
+
+selected_strains <- c("32G4B12", "Mcba15-009", "28G4A10", "35G1B04")
+
+preds_select <- preds |>
+  filter(strain %in% selected_strains,
+         date != "2024-01-14") |>
+  mutate(subclade = case_when(strain == "28G4A10" ~ "IBa",
+                              strain == "32G4B12" ~ "IBb",
+                              TRUE ~ subclade))
+
+
+
+# update color info
+subclade_colors <- clade_colors |>
+  add_row(
+    variable = c("IBa", "IBb"),
+    color    = c("#009ACD", "#6EDEFD")
+  ) |>
+  tibble::deframe()
+
+
+### first recode subclade IB
+ preds %>%
+    filter(date != "2024-01-14",
+           clade == "I") |>
+  select(strain) |>
+  distinct() |>
+  count()
+
+length(unique(preds$strain[preds$clade == "I"]))
+
+
+
+### first recode subclade IB
+temp_curve <- preds %>%
+    filter(date != "2024-01-14",
+           clade == "I") |> 
+    ggplot(aes(x = temp,
+                      color = strain,
+                      group = strain.date,
+                      y = best_fitted)) +
+    geom_line(alpha = 0.15, linewidth = 0.5) +
+    scale_color_manual(values = strain_clade_col, guide = "none") +
+    # 2) tell ggplot we want a *new* colour scale
+    ggnewscale::new_scale_color() +
+    geom_line(data = preds_select,
+               aes(temp, best_fitted, color = subclade), alpha = 1, linewidth = 1.2) +
+    scale_colour_manual(name   = "Subclade",
+                        values = subclade_colors) +
+    scale_x_continuous(breaks = seq(4,46, 3)) +
+    ylim(0, 1.2) +
+    #labs(title = "Temperature performance",
+         #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))) +
+    #ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
+    ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+    xlab("Temperature (ºC)") +
+    apatheme +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+          axis.text.y = element_text(size = 10),
+          strip.background = element_blank(),
+          text = element_text(size = 12),
+          #strip.text.x = element_blank(),
+          plot.title = element_text(color = "black", size = 18),
+          plot.subtitle = element_text(color = "black", size = 16),
+          legend.position = "bottom")
+print(temp_curve)
+
+
+  ggsave(
+      filename = "plots/temp_curves/temp_curves_selected_strains.pdf",
+      plot     = temp_curve,
+      width    = 120,
+      height   = 80,
+      units    = "mm",
+      dpi      = 300,
+      device = cairo_pdf
+    )
+  
+  
+## exporting data ##
+
+clade_I_preds <- preds %>%
+    filter(date != "2024-01-14",
+           clade == "I") |>
+  select(-c(clade, subclade)) |>
+  left_join(clade_info_upd,
+            by = c("strain" = "StrainID")) |>
+  mutate(Alex_subclade_classification = case_when(subclade == "IBa" ~ "ID",
+                              subclade == "IBb" ~ "IE",
+                              subclade == "IC" ~ "IBC",
+                              TRUE ~ subclade))
+  
+
+write.table(clade_I_preds,
+            file = here("output/temp/clade_I_predictions_updated_classification.csv"),
+            row.names = F,
+            col.names = T,
+            quote = F, sep = ",")
+
+clade_I_obs <- d_filtered_wmd %>%
+    filter(date != "2024-01-14",
+           clade == "I") |>
+  select(-c(clade, subclade)) |>
+  left_join(clade_info_upd,
+            by = c("strain" = "StrainID")) |>
+  mutate(Alex_subclade_classification = case_when(subclade == "IBa" ~ "ID",
+                              subclade == "IBb" ~ "IE",
+                              subclade == "IC" ~ "IBC",
+                              TRUE ~ subclade))
+
+write.table(clade_I_obs,
+            file = here("output/temp/clade_I_observations_updated_classification.csv"),
+            row.names = F,
+            col.names = T,
+            quote = F, sep = ",")
+
+
+```
+
+```{r, include=FALSE}
+# Function to create a plot for a subset of strains
+#plot_subset <- function(data, strains_subset, d_filtered, plot_number, clade) {
+#  p <- ggplot(data %>% filter(strain %in% strains_subset)) +
+#    geom_line(aes(temp, .fitted, col = model_name)) +
+#    geom_point(aes(temp, rate), d_filtered %>% filter(strain %in% strains_subset)) +
+#    facet_wrap(~strain, scales = 'free_y', ncol = 5) +
+#    theme_bw() +
+#    theme(legend.position = 'none') +
+#    scale_color_brewer(type = 'qual', palette = 2) +
+#    labs(x = 'Temperature (ºC)',
+#         y = 'Metabolic rate',
+#         title = paste('Thermal performance curves - Plot', plot_number, '- Clade:', clade),
+#         subtitle = 'gaussian in green; sharpeschoolhigh in orange')
+#  return(p)
+#}
+#
+## Define the number of strains per plot
+#strains_per_plot <- 20
+## Split data by clade
+#d_preds_by_clade <- split(d_preds, d_preds$clade)
+#
+## Initialize a list to store the plots
+#plots <- list()
+#plot_number <- 1
+#
+## Loop over each clade and split further into subsets of strains_per_plot
+#for (clade in names(d_preds_by_clade)) {
+#  clade_data <- d_preds_by_clade[[clade]]
+#  unique_strains <- unique(clade_data$strain)
+#  
+#  # Split the strains into subsets
+#  strain_subsets <- split(unique_strains, ceiling(seq_along(unique_strains) / strains_per_plot))
+#  
+#  # Generate plots for each subset
+#  clade_plots <- map2(strain_subsets, seq_along(strain_subsets), ~{
+#    plot_subset(d_preds, .x, d_filtered, plot_number, clade)
+#  })
+#  
+#  # Add the generated plots to the main list
+#  plots <- c(plots, clade_plots)
+#  plot_number <- plot_number + length(clade_plots)
+#}
+#
+## Display the first plot as an example
+##print(plots[[1]])
+#
+#
+##for (plot in plots) {
+##  print(plot)
+##}
+
+# Save the plots to files
+#walk2(plots, seq_along(plots), ~ggsave(filename = paste0("plots/thermal_performance_curves_", .y, ".png"), plot = .x, width = 12, height = 8))
+```
+
+#### Thermal performance parameters
+
+The traits of each thermal performance curve can also easily be
+calculated.
+
+```{r params , message=FALSE, warning=FALSE, echo=FALSE}
+# stack models and calculate extra params
+d_params <- pivot_longer(d_fits, names_to = 'model_name', values_to = 'fit',
+                         c(sharpeschoolhigh,sharpeschoolfull,pawar)) %>%
+  mutate(params = map(fit, calc_params, .progress = T)) %>%
+  select(strain.date, model_name, params) %>%
+  unnest(params) %>%
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = F       # keep the original strain.date if you still need it
+  ) %>%
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T)
+
+glimpse(d_params)
+
+d_params <- d_params |>
+   filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND" & !is.na(clade))))
+
+d_params <- d_params %>% filter(!is.na(clade))
+
+
+d_params_ssfull <- d_params %>%
+  filter(model_name == "sharpeschoolfull") %>%
+  select(strain, date, strain.date, rmax, ctmin, ctmax, topt, breadth) %>%
+  filter(date != "2024-01-14") |>
+  select(-c(date)) %>%
+  tibble::column_to_rownames("strain.date")
+
+d_params_ssfull[sapply(d_params_ssfull, is.infinite)] <- NA
+
+pca <-prcomp(na.omit(d_params_ssfull) %>% filter(!strain %in% c("09D09", "23G4B04")) |> select(-strain)
+             ,
+             scale. = T, center = T)
+
+
+pca.df <- data.frame(pca$x) %>%
+  select(PC1, PC2) |>
+  tibble::rownames_to_column("strain.date") |> 
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # keep the original strain.date if you still need it
+  ) %>%
+    merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T) |>
+    filter(!is.na(subclade))
+
+PCAloads<-data.frame(Variables = rownames(pca$rotation), pca$rotation)
+
+pca_plot<-ggplot(pca.df #%>% filter(Row.names != "23G4B04")
+                 , aes(PC1, PC2)) +
+  geom_point(data = pca.df, aes(color = subclade),  size = 5, alpha = 0.5) +
+  #geom_text(data = pca.df, aes(x=PC1, y=PC2-0.15), label=pca.df$Row.names, size=2.75) +
+  scale_color_manual(values = subclade_col, name="Subclade") +
+  geom_segment(data = PCAloads,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               arrow = arrow(length = unit(0.3, "cm")),
+               colour="grey", inherit.aes = FALSE) +
+ geom_text(data=PCAloads,
+           aes(x=PC1*2.5, y=PC2*2.5, label=Variables),
+           size=6,
+           colour = "darkblue") +
+  xlab("PC1 (49.75%)") +
+  ylab("PC2 (39.84%)") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), text = element_text(size = 18))
+pca_plot
+
+summary(pca)
+
+  
+
+d_params_ssfull_topSubclades <- d_params %>%
+  filter(model_name == "sharpeschoolfull") %>%
+  filter(!strain %in% c("09D09", "23G4B04")) |>
+  filter(subclade %in% c("IC", "IIG", "IIIA", "IVB")) |>
+  select(date, strain.date, ctmin, ctmax, topt, breadth) %>%
+  filter(date != "2024-01-14") |>
+  select(-c(date)) %>%
+  tibble::column_to_rownames("strain.date")
+
+
+d_params %>%
+  filter(model_name == "sharpeschoolfull") %>%
+  filter(!strain %in% c("09D09", "23G4B04")) |>
+  filter(subclade %in% c("IC", "IIG", "IIIA", "IVB")) |>
+  filter(date != "2024-01-14") |>
+  group_by(subclade) |> 
+  summarise(avg.topt = mean(topt, na.rm = T),
+            avg.ctmin = mean(ctmin, na.rm = T),
+            avg.ctmax = mean(ctmax, na.rm = T),
+            avg.breadth = mean(breadth, na.rm = T))
+
+
+
+
+
+pca_ssfull_topSubclades <- prcomp(na.omit(d_params_ssfull_topSubclades ), scale. = T, center = T)
+
+pca.ssfull_topSubclades.df <- data.frame(pca_ssfull_topSubclades$x) %>%
+  select(PC1, PC2) %>% 
+  tibble::rownames_to_column("strain.date") |> 
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # keep the original strain.date if you still need it
+  ) %>%
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T)
+
+PCAloads.ssfull_topSubclades <- data.frame(Variables = rownames(pca_ssfull_topSubclades$rotation), 
+                                           pca_ssfull_topSubclades$rotation) |>
+                                              mutate(Variables = recode(Variables,
+                                                                        "ctmin" = "Min. Temp",
+                                                                        "topt" = "Opt. Temp",
+                                                                        "ctmax" = "Max. Temp",
+                                                                        "breadth" = "Breadth"))
+
+pca_plot.ssfull_topSubclades<-ggplot(pca.ssfull_topSubclades.df,
+                                     aes(PC1, PC2)) +
+  geom_point(data = pca.ssfull_topSubclades.df, aes(color = subclade),  size = 1.5, alpha = 0.75) +
+  scale_color_manual(values = subclade_col, name="Subclade") +
+  geom_segment(data = PCAloads.ssfull_topSubclades,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               colour="grey", inherit.aes = FALSE) +
+  geom_text(data=PCAloads.ssfull_topSubclades,
+           aes(x=PC1*4.5, y=PC2*4.5, label=Variables),
+           size=2,
+           colour = "black",
+           alpha = 1,
+           fontface = "bold") +
+  lims(x = c(-6.5, 6.5),
+       y = c(-4.5, 4.5)) +
+  xlab(paste0("PC1 (",round(summary(pca_ssfull_topSubclades)$importance[2,1] * 100, 2),"%)")) +
+  ylab(paste0("PC2 (",round(summary(pca_ssfull_topSubclades)$importance[2,2] * 100, 2),"%)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 8),
+        legend.position = "none",
+        legend.position.inside = c(0.9, 0.2),
+        legend.background = element_rect(fill = alpha("white", 0), color = NA),
+        legend.key.size = unit(0.5, "lines"),
+        legend.title = element_text(size = 6,
+                                    margin = margin(b = 0, unit = "pt")),
+        legend.text = element_text(size = 5),
+        legend.key.height = unit(0.4, "lines"),
+        legend.key.width = unit(0.7, "lines"),
+        legend.spacing.y = unit(0, "cm"))
+pca_plot.ssfull_topSubclades
+
+ggsave(
+      filename = "plots/pca_plot.ssfull_topSubclades_r.pdf",
+      plot     = pca_plot.ssfull_topSubclades,
+      width    = 90,
+      height   = 90,
+      units    = "mm",
+      dpi      = 300,
+      device = cairo_pdf
+    )
+
+#### a quick PERMANOVA to test the effect of subclade membership on curve parameters
+
+D <- dist(pca_ssfull_topSubclades$x, "euclidean")
+
+perm <- vegan::adonis2(D ~ subclade, data = pca.ssfull_topSubclades.df, permutations = 999)
+
+perm
+
+
+#summary(pca_schol)
+
+# pick a handful of key traits
+traits <- c("rmax", "ctmax", "topt", "breadth")
+
+d_params_ssfull %>%
+  # merge with clade info
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T) |>
+  filter(clade != "UND") |>
+  filter(!is.na(subclade)) |> 
+  # raname coulumn row.names to strain
+  #rename(strain = Row.names) |>
+  # select columns of interest
+  select(strain, clade, subclade, all_of(traits)) %>%
+  # pivot longer for plotting
+  pivot_longer(cols = traits, names_to = "term", values_to = "value") %>%
+  # plot 
+  ggplot(aes(subclade, value, fill = subclade)) +
+    geom_boxplot() +
+    scale_fill_manual(values = subclade_col, name="Subclade") +
+    ggh4x::facet_nested_wrap(~ term + clade, scales = "free", ncol = 4) +
+    ggpubr::stat_compare_means(aes(label = ..p.signif..), method = "kruskal.test") +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    labs(x = "Subclade", y = "Estimate", title = "Trait differences among Subclades")
+
+
+
+dotplot_traits_by_subclade <- function(
+  params_df,     # your d_params_ssfull
+  clade_info,    # your clade_info (with StrainID → clade, subclade)
+  traits,        # character vector of trait names, e.g. c("topt","rmax","ctmax")
+  subclades = NULL,      # which subclades to plot; NULL = all
+  facet_by_clade = T,    # if FALSE, facet only by term
+  filename  = NULL,      # if non-NULL, path to save the PNG
+  width_mm  = 180,
+  height_mm = 100,
+  dpi       = 300
+){
+  # 1. join metadata and pivot longer
+  df_long <- params_df %>%
+    left_join(clade_info, by = c("strain" = "StrainID")) %>%
+    filter(clade != "UND", !is.na(subclade)) %>%
+    { if(!is.null(subclades)) filter(., subclade %in% subclades) else . } %>%
+    pivot_longer(
+      cols      = all_of(traits),
+      names_to  = "term",
+      values_to = "value"
+    ) |>
+    mutate(forcats::fct_rev(forcats::fct_inorder(subclade)))
+  
+  # 2. build the plot
+  plt <- ggplot(df_long,
+                aes(x = value,
+                    y = subclade,
+                    colour = subclade)) +
+    geom_jitter(height = 0.15, alpha = 0.35) +
+    stat_summary(fun = mean, geom = "point",
+                 size = 3, shape = 21, fill = "white") +
+    stat_summary(fun.data = mean_cl_boot,
+                 geom     = "errorbarh",
+                 height   = 0.2) +
+    scale_y_discrete(limits = rev) +
+    scale_colour_manual(values = subclade_col, guide = FALSE) +
+    labs(x = "Estimate", y = "Subclade") +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.y      = element_text(face = "bold"),
+      strip.text       = element_text(size = 16),
+      panel.grid.major = element_line(colour = "grey90"),
+      panel.grid.minor = element_blank(),
+      legend.position  = "none"
+    )
+  
+  # 3. Add faceting
+  if (facet_by_clade) {
+      plt <- plt + facet_grid(clade ~ term, scales = "free", space = "free_y") 
+  } else {
+    plt <- plt + facet_grid(~ term, scales = "free", space = "free_y") 
+  }
+  
+  
+  
+  # 4. print, and optionally save
+  print(plt)
+  if(!is.null(filename)){
+    ggsave(filename   = filename,
+           plot       = plt,
+           width      = width_mm,
+           height     = height_mm,
+           units      = "mm",
+           dpi        = dpi)
+  }
+  
+  return(plt)
+}
+
+
+
+
+# Plot all subclades:
+Subcl_dot_plot <- dotplot_traits_by_subclade(
+  params_df = d_params_ssfull,
+  clade_info = clade_info,
+  traits = traits#,
+  #filename = "~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot.png"
+)
+
+# Plot just two subclades, and save:
+topSubcl_dot_plot <- dotplot_traits_by_subclade(
+  params_df  = d_params_ssfull,
+  clade_info = clade_info,
+  traits     = traits,
+  subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
+  facet_by_clade = F,
+  filename   = here("output/temp/plots/curve_params_dotplot_abundantSubclades.png")
+)
+
+# map subclade -> clade (unique map)
+sub2clade <- clade_info %>%
+  distinct(subclade, clade) %>%
+  filter(!is.na(subclade), clade != "UND")
+
+
+d_params_schol_long <- d_params_ssfull %>%
+  # merge with clade info
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T) |>
+  filter(clade != "UND", !is.na(subclade)) |>
+  select(subclade, all_of(traits)) %>%
+  pivot_longer(cols = traits, names_to = "term", values_to = "value")
+
+d_params_ssfull <- d_params_ssfull |>
+  left_join(clade_info, by = c("strain" = "StrainID"))
+
+
+
+posthocs <- d_params_schol_long %>%
+  # only keep the subclades you care about
+  
+  #filter(subclade %in% c("IC","IIG","IIIA","IIIE","IVB","IVE")) %>%
+  filter(!subclade %in% c("IIIB", "IVA")) %>%
+  group_by(term) %>%
+  do({
+    dat <- .
+
+    # 1) must have ≥2 subclades and each with ≥2 obs
+    sub_counts <- dat %>% count(subclade) 
+    if (n_distinct(dat$subclade) < 2 ||
+        any(sub_counts$n < 2)) {
+      return(tibble()) 
+    }
+
+    # 2) normality?
+    if (nrow(dat) >= 3) {
+      sw_p <- dat |> rstatix::shapiro_test(value) |> pull(p)
+    } else {
+      sw_p <- NA_real_
+    }
+
+    # 3) homogeneity?
+    lev_p <- rstatix::levene_test(dat, value ~ subclade)$p
+
+    # 4) choose test
+    if (!is.na(sw_p) && sw_p > 0.05 && lev_p > 0.05) {
+      # ANOVA + Tukey
+      omni <- rstatix::anova_test(dat, value ~ subclade)
+      ph   <- rstatix::tukey_hsd(dat, value ~ subclade) %>%
+                mutate(method = "Tukey HSD")
+      test_type <- "ANOVA"
+    } else {
+      # Kruskal–Wallis + Dunn
+      omni <- rstatix::kruskal_test(dat, value ~ subclade)
+      ph   <- rstatix::dunn_test(dat, value ~ subclade, p.adjust.method = "BH") %>%
+                mutate(method = "Dunn (BH)")
+      test_type <- "KW"
+    }
+
+    # 5) build omnibus row
+    x_max <- max(dat$value, na.rm = TRUE)
+    omnibus_df <- tibble(
+      term         = unique(dat$term),
+      group1       = NA_character_,
+      group2       = NA_character_,
+      p.adj        = omni$p,
+      p.adj.signif = as.character(
+                                  symnum(omni$p,
+                                         corr = F,
+                                         cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                                         symbols   = c("***","**","*","ns"))
+                                  ),
+      x.position   = x_max * 1.08,
+      method       = test_type
+      )
+    
+    # 6) position pairwise rows just below
+    ph_df <- ph %>%
+      mutate(
+        term         = unique(dat$term),
+        p.adj.signif = as.character(
+                          symnum(p.adj,
+                                 corr = F,
+                                 cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                                 symbols   = c("***","**","*","ns"))
+                        ),
+        x.position = x_max * 1.05)
+
+    bind_rows(omnibus_df, ph_df)
+  }) %>%
+  ungroup()
+
+# Inspect your posthocs table
+posthocs
+
+# 2. Compute max per panel so we can place omnibus labels
+panel_ranges <- d_params_schol_long %>%
+  filter(term %in% traits) |>
+  group_by(term) %>%
+  summarise(xmax = max(value, na.rm=TRUE), .groups="drop") %>%
+  mutate(xpos = xmax * 1.02)     # 2% beyond the data
+
+# 4. Join in the xpos
+posthocs <- posthocs %>%
+  left_join(panel_ranges, by = "term")
+
+
+# 1) Pull out just your omnibus rows
+posthocs_omni <- posthocs %>%
+  filter(term %in% traits) |>
+  filter(is.na(group1)) |>
+  mutate(clade = "IV")
+
+
+# 2) For each term, build a named vector of p’s and feed to multcompLetters
+letter_df <- posthocs %>%
+  filter(term %in% traits) |>
+  filter(!is.na(group1)) %>% 
+  select(term, group1, group2, p.adj) |> 
+  group_by(term) %>%
+  summarise(
+    # build a named vector c("A-B"=p1, "A-C"=p2, ...)
+    pv = list( setNames(p.adj, paste(group1, group2, sep = "-")) ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # run multcompLetters on each vector
+    letters = map(pv, ~ multcompView::multcompLetters(.x, threshold = 0.05)$Letters)
+  ) %>%
+  select(-pv) %>%
+  unnest_longer(letters, indices_to = "subclade", values_to = "letter") |>
+  left_join(panel_ranges, by = "term") |> left_join(sub2clade, by = "subclade")
+
+# 2) Add the text directly
+topSubcl_dot_plot +
+  geom_text(
+    data        = posthocs_omni,
+    aes(x        = x.position * 0.68,
+        y        = 0.25,
+        label    = p.adj.signif),
+    inherit.aes = FALSE,
+    size = 10,
+    hjust = 0      # left‐justify so it sits just outside
+  ) +
+  geom_text(
+    data        = letter_df,
+    aes(x     = xpos * 0.1,
+        y     = subclade,
+        label = letter),
+    inherit.aes = FALSE,
+    size        = 5,
+    hjust       = 0
+  )
+
+
+ggsave(
+      filename = here("output/temp/plots/curve_params_dotplot_topSubclades.png"),
+      width    = 180,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+
+# 2) Add the text directly
+Subcl_dot_plot +
+  geom_text(
+    data        = posthocs_omni,
+    aes(x        = x.position * 0.68,
+        y        = 1,
+        label    = p.adj.signif),
+    inherit.aes = FALSE,
+    size = 8,
+    hjust = 0      # left‐justify so it sits just outside
+  ) +
+  geom_text(
+    data        = letter_df,
+    aes(x     = xpos * 0.1,
+        y     = subclade,
+        label = letter),
+    inherit.aes = FALSE,
+    size        = 3,
+    hjust       = 0
+  )
+
+
+ggsave(
+      filename = here("output/temp/plots/curve_params_dotplot_Subclades.png"),
+      width    = 180,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+d_params_ssfull <- d_params_ssfull |>
+  select(-c(clade, subclade))
+
+
+plot_traits_subclade <- function(
+  params_df,              # data with columns: strain, <traits...>
+  clade_info,             # columns: StrainID, clade, subclade
+  traits,                 # e.g., c("topt","rmax","ctmax","breadth","ctmin")
+  k_traits     = NULL,    # optionally for traits calculated with LOESS model
+  subclades    = NULL,    # keep only these subclades (keeps order if given)
+  exclude_subs = NULL,    # drop these subclades
+  facet_by_clade = TRUE,  # facet with clade rows; else only by term
+  subclade_levels = NULL, # order of subclades
+  flip = FALSE,           # horizontal (FALSE) vs vertical (TRUE) layout
+  term_labels = NULL,
+  show_annotations = c("both","omnibus","letters","none"),
+  omnibus_in_clade = NULL, # which clade row should show the omnibus star; NULL -> first
+  subclade_col = NULL,    # named vector of subclade colours (names must match levels)
+  filename = NULL, width_mm = 180, height_mm = 100, dpi = 300
+){
+  show_annotations <- match.arg(show_annotations)
+
+  # ---------- 1) Long data (and factor ordering) ----------
+  df_long <- params_df %>%
+    dplyr::left_join(clade_info, by = c("strain" = "StrainID")) %>%
+    dplyr::filter(!is.na(subclade), clade != "UND") %>%
+    { if (!is.null(subclades)) dplyr::filter(., subclade %in% subclades) else . } %>%
+    { if (!is.null(exclude_subs)) dplyr::filter(., !subclade %in% exclude_subs) else . } %>%
+    tidyr::pivot_longer(dplyr::all_of(traits), names_to = "term", values_to = "value") %>%
+    dplyr::mutate(
+      # order subclades: keep user order if supplied; else by first appearance, then flip so first is top
+      subclade = if (!is.null(subclade_levels)) forcats::fct_relevel(subclade, subclade_levels)
+                 else if (!is.null(subclades)) forcats::fct_relevel(subclade, rev(subclades))
+                 else forcats::fct_rev(forcats::fct_inorder(subclade)),
+      clade    = factor(clade)
+    )
+
+  y_levels <- levels(df_long$subclade)          # to align annotations
+  clade_levels <- levels(df_long$clade)
+  if (is.null(omnibus_in_clade)) omnibus_in_clade <- clade_levels[1]
+  
+  ## define parameter order
+  
+  if (!is.null(traits)) {
+    term_levels <- c("topt","ctmax","rmax", "breadth")
+    df_long <- df_long |>
+    mutate(term = factor(term, levels = term_levels))
+  } else if (!is.null(k_traits)) {
+      term_levels <- c("topt","ctmax","rmax", "breadth", k_traits)
+  df_long <- df_long |>
+    mutate(term = factor(term, levels = term_levels))
+  
+  }
+  
+  facet_labeller <- if (!is.null(term_labels)) {
+        labeller(term = as_labeller(term_labels))
+      } else {
+        label_value  # default
+      }
+  
+  
+  # ---------- 2) Base plot ----------
+  if (!flip) {
+    plt <- ggplot2::ggplot(df_long, ggplot2::aes(x = value, y = subclade, colour = subclade)) +
+      ggplot2::geom_jitter(height = 0.15, alpha = 0.35) +
+      ggplot2::stat_summary(fun = mean, geom = "point", size = 3, shape = 21, fill = "white") +
+      ggplot2::stat_summary(fun.data = mean_cl_boot, geom = "errorbarh", height = 0.2) +
+      ggplot2::labs(x = "Temperature (ºC)", y = "Subclade")
+    plt <- plt + if (facet_by_clade)
+      ggplot2::facet_grid(clade ~ term, scales = "free", space = "free_y",
+                          labeller = facet_labeller)
+    else
+      ggplot2::facet_grid(~ term, scales = "free", space = "free_y",
+                          labeller = facet_labeller)
+  } else {
+    plt <- ggplot2::ggplot(df_long, ggplot2::aes(y = value, x = subclade, colour = subclade)) +
+      ggplot2::geom_jitter(width = 0.15, alpha = 0.35) +
+      ggplot2::stat_summary(fun = mean, geom = "point", size = 3, shape = 21, fill = "white") +
+      ggplot2::stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+      ggplot2::labs(y = "Temperature (ºC)", x = "Subclade") +
+      scale_y_continuous(position = "right")
+    plt <- plt + if (facet_by_clade)
+      ggplot2::facet_grid(term ~ clade, scales = "free", space = "free_x", switch = "y",
+                          labeller = facet_labeller)
+    else
+      ggplot2::facet_grid(term ~ ., scales = "free", space = "free_x", switch = "y",
+                          labeller = facet_labeller)
+  }
+
+  if (!is.null(subclade_col)) {
+    plt <- plt + ggplot2::scale_colour_manual(values = subclade_col, guide = "none")
+  } else {
+    plt <- plt + ggplot2::guides(colour = "none")
+  }
+
+  plt <- plt +
+    ggplot2::theme_minimal(base_size = 8) +
+    ggplot2::theme(
+      axis.text.y = ggplot2::element_text(face = "bold"),
+      strip.text  = ggplot2::element_text(size = 8),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+
+  # ---------- 3) Stats (omnibus + posthocs) ----------
+  # Helper: run per (clade, term) if faceting by clade; else per term (across clades)
+  #stats_grouping <- if (facet_by_clade) c("clade","term") else c("term")
+  stats_grouping <- "term"
+
+  # map subclade -> clade (ensures clade present if needed)
+  sub2clade <- clade_info %>%
+    dplyr::distinct(subclade, clade) %>%
+    dplyr::filter(!is.na(subclade), clade != "UND")
+
+  stat_input <- df_long %>%
+    dplyr::select(clade, subclade, term, value) #%>%
+    #{ if (facet_by_clade) dplyr::left_join(., sub2clade, by = "subclade") else . }
+
+  posthocs <- stat_input %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(stats_grouping))) %>%
+    dplyr::do({
+      dat <- .
+      sub_counts <- dplyr::count(dat, subclade)
+      if (dplyr::n_distinct(dat$subclade) < 2 || any(sub_counts$n < 2)) return(tibble::tibble())
+
+      sw_p  <- tryCatch(rstatix::shapiro_test(dat, value) %>% dplyr::pull(p), error = function(e) NA_real_)
+      lev_p <- tryCatch(rstatix::levene_test(dat, value ~ subclade) %>% dplyr::pull(p), error = function(e) NA_real_)
+
+      if (!is.na(sw_p) && sw_p > 0.05 && !is.na(lev_p) && lev_p > 0.05) {
+        omni <- rstatix::anova_test(dat, value ~ subclade)
+        ph   <- rstatix::tukey_hsd(dat, value ~ subclade) %>% dplyr::mutate(method = "Tukey HSD")
+        test_type <- "ANOVA"
+      } else {
+        omni <- rstatix::kruskal_test(dat, value ~ subclade)
+        ph   <- rstatix::dunn_test(dat, value ~ subclade, p.adjust.method = "BH") %>% dplyr::mutate(method = "Dunn (BH)")
+        test_type <- "KW"
+      }
+
+      vmax <- max(dat$value, na.rm = TRUE)
+      omni_row <- tibble::tibble(
+        group1 = NA_character_, group2 = NA_character_,
+        p.adj  = as.numeric(omni$p)[1],
+        p.adj.signif = as.character(stats::symnum(as.numeric(omni$p)[1],
+                                                  corr = FALSE,
+                                                  cutpoints = c(0,.001,.01,.05,1),
+                                                  symbols   = c("***","**","*","n.s."))),
+        xpos = vmax * 1.02, step = "omnibus", method = test_type
+      )
+
+      ph_rows <- ph %>%
+        dplyr::transmute( 
+          group1, group2, p.adj,
+          p.adj.signif = as.character(stats::symnum(p.adj, corr = FALSE,
+                                                    cutpoints = c(0,.001,.01,.05,1),
+                                                    symbols   = c("***","**","*","n.s."))),
+          xpos = vmax * 0.08, step = "posthoc", method
+        )
+
+      dplyr::bind_rows(omni_row, ph_rows)
+    }) %>%
+    dplyr::ungroup()
+
+  # Letters per panel
+  letter_df <- posthocs %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(stats_grouping))) %>%
+    dplyr::summarise(
+      pv = list(stats::setNames(p.adj, paste(group1, group2, sep = "-"))),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(letters = purrr::map(pv, ~ multcompView::multcompLetters(.x, threshold = 0.05)$Letters)) %>%
+    dplyr::select(-pv) %>%
+    tidyr::unnest_longer(letters, indices_to = "subclade", values_to = "letter") %>%
+    dplyr::mutate(subclade = factor(subclade, levels = y_levels)) |>
+    left_join(sub2clade, by = "subclade") |>
+    drop_na()
+
+  # One omnibus per term (place in chosen clade if facetted)
+  if (facet_by_clade) {
+    posthocs_omni_one <- posthocs %>%
+      dplyr::filter(step == "omnibus") %>%
+      dplyr::group_by(term) %>%
+      dplyr::summarise(p.adj.signif = dplyr::first(p.adj.signif),
+                       xpos         = dplyr::first(xpos),
+                       .groups = "drop") %>%
+      dplyr::mutate(clade = factor(omnibus_in_clade, levels = clade_levels))
+  } else {
+    posthocs_omni_one <- posthocs %>%
+      dplyr::filter(step == "omnibus") %>%
+      dplyr::group_by(term) %>%
+      dplyr::summarise(p.adj.signif = dplyr::first(p.adj.signif),
+                       xpos         = dplyr::first(xpos),
+                       .groups = "drop")
+  }
+
+  
+  # compute per-term y positions for annotations (works with facet rows = term)
+  rng <- df_long %>%
+    dplyr::group_by(term) %>%
+    dplyr::summarise(
+      min = min(value, na.rm = TRUE),
+      max = max(value, na.rm = TRUE),
+      span = max - min,
+      # put letters a bit above the top of the data for that term
+      lab = max + 0.06 * span,
+      # position for the omnibus star
+      star = max + 0.12 * span,
+      .groups = "drop"
+    )
+  
+  # join positions to your annotation data
+  letters_plt <- letter_df %>% dplyr::left_join(rng, by = "term")
+  omni_plt    <- posthocs_omni_one %>%
+    #dplyr::distinct(term, p.adj.signif) %>%
+    dplyr::left_join(rng, by = "term")
+  
+  # ---------- 4) Add annotations ----------
+  if (show_annotations %in% c("both","omnibus")) {
+    if (!flip) {
+      plt <- plt + ggplot2::geom_text(
+        data = omni_plt,
+        ggplot2::aes(x = star*0.85, y = -Inf, label = p.adj.signif),
+        inherit.aes = FALSE, vjust = 1.2, size = 3
+      )
+    } else {
+      plt <- plt + ggplot2::geom_text(
+        data = omni_plt,
+        ggplot2::aes(y = star*0.85, x = -Inf, label = p.adj.signif),
+        inherit.aes = FALSE, hjust = -0.1, size = 3
+      )
+    }
+  }
+
+  if (show_annotations %in% c("both","letters")) {
+    if (!flip) {
+      plt <- plt + ggplot2::geom_text(
+        data = letters_plt,
+        ggplot2::aes(x = lab*0.85, y = subclade, label = letter),
+        inherit.aes = FALSE, hjust = 0, size = 2.5
+      )
+    } else {
+      plt <- plt + ggplot2::geom_text(
+        data = letters_plt,
+        ggplot2::aes(y = lab*0.85, x = subclade, label = letter),
+        inherit.aes = FALSE, vjust = 0, hjust = 2.5, size = 2.5
+      )
+    }
+  }
+
+  # ---------- 5) Save & return ---------- 
+  print(plt)
+  if (!is.null(filename)) {
+    ggplot2::ggsave(filename, plot = plt,
+                    width = width_mm, height = height_mm,
+                    units = "mm", dpi = dpi, bg = "white")
+  }
+
+  invisible(list(
+    plot = plt,
+    data_long = df_long,
+    posthocs = posthocs,
+    letters  = letter_df,
+    omnibus_one = posthocs_omni_one
+  ))
+}
+
+# helper for a safe default (returns b if a is NULL)
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+
+
+
+
+out <- plot_traits_subclade(
+  params_df = d_params_ssfull,
+  clade_info = clade_info,
+  traits = c("breadth","ctmax","topt"),
+  subclades = c("IC","IIG","IIIA","IIIE","IVB","IVE"),
+  #subclades = NULL,                 # or c("IC","IIG","IIIA","IIIE","IVB","IVE")
+  #exclude_subs = c("IIIB","IVA"),
+  subclade_levels = c("IC","IIG","IIIA","IIIE","IVB","IVE"),
+  facet_by_clade = F,
+  flip = T,
+  term_labels = c(
+    topt  = "Opt. Temp.",
+    ctmax  = "Max. Temp.",
+    breadth = "Breadth"
+  ),
+  show_annotations = "both",
+  omnibus_in_clade = "I",           # show omnibus star in clade I row
+  subclade_col = subclade_col,      # named vector of colours
+  filename = here("output/temp/plots/curve_params_dotplot_Subclades_flip.png"),
+  width_mm = 180, height_mm = 120, dpi = 300
+)
+
+View(out$posthocs)
+
+# per-subclade optimal pH (where avg_k is maximal)
+opt_by_sub <- d_params_ssfull |>
+  left_join(clade_info, by = c("strain" = "StrainID")) |>
+  dplyr::filter(subclade %in% c("IC","IIG","IIIA","IIIE","IVB","IVE")) |>
+  dplyr::group_by(subclade) |>
+  summarise(n = sum(!is.na(topt)),
+            mean_topt = mean(topt),
+            med_topt = median(topt),
+            topt_se = sd(topt)/sqrt(n),
+            topt_sd = sd(topt)
+            ) |>
+  #dplyr::slice_max(topt, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup() #|>
+  #dplyr::transmute(subclade, topt = topt)
+
+
+temp_curve_avg <- temp_curve_avg +
+  geom_vline(data = opt_by_sub,
+             aes(xintercept = mean_topt),
+             linetype = "dashed", linewidth = 0.4, colour = "black",
+             inherit.aes = FALSE)
+
+ggpubr::ggarrange(temp_curve_avg, out$plot,
+                  ncol = 1,align = "hv",
+                  heights = c(1, 1.5), labels = c("A", "C"),
+                  hjust = 0.05, font.label = list(size = 10))
+
+ggsave(
+      filename = "plots/temp_curves/combined_avg_params.png"
+      ,
+      width    = 100,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300,
+      device = "png",
+      bg = "white"
+    )
+
+
+pH_curve_avg_subclades_K <- readRDS(here("output/rds/pH_curve_avg_subclades_K.rds"))
+out_k_plot <- readRDS(here("output/rds/out_k_plot.rds"))
+
+ggpubr::ggarrange(temp_curve_avg, pca_plot.ssfull_topSubclades,
+                  ncol = 1,align = "hv",
+                  heights = c(1, 1.5), labels = "AUTO",
+                  hjust = 0.05, font.label = list(size = 10))
+
+ggsave(
+      filename = "plots/temp_curves/combined_avg_params_r_pca.png"
+      ,
+      width    = 100,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+ggpubr::ggarrange(
+  temp_curve_avg, pH_curve_avg_subclades_K,
+  out$plot,       out_k_plot,
+  ncol = 2, nrow = 2,
+  heights = c(1, 1.5),
+  labels = c("A", "B", "C", "D"),
+  align = "hv",
+  hjust = 0.05, font.label = list(size = 10)
+)
+
+
+ggsave(
+      filename = here("output/temp/plots/temp_pH_curves_and_dotplot_2.png"),
+      width    = 230,
+      height   = 120,
+      units    = "mm",
+      dpi      = 300,
+      bg       = "white"
+    )
+
+
+
+
+    temp_curve_avg_only_mean <- temp_curve_avg_only +
+  # vertical SE band
+  geom_rect(
+    data = opt_by_sub %>% filter(subclade %in% c("IC","IIG","IIIA","IVB")),
+    aes(xmin = mean_topt - topt_se, xmax = mean_topt + topt_se, ymin = -Inf, ymax = Inf, fill = subclade),
+    inherit.aes = FALSE,
+    alpha = 0.12,
+    show.legend = FALSE
+  ) +
+  geom_vline(data = opt_by_sub |> dplyr::filter(subclade %in% c("IC","IIG","IIIA","IVB")),
+             aes(xintercept = mean_topt, color = subclade),
+             linetype = "dashed", linewidth = 0.75,
+             inherit.aes = FALSE)
+print(temp_curve_avg_only_mean)
+
+ggpubr::ggarrange(temp_curve_avg_only_mean, pca_plot.ssfull_topSubclades,
+                  ncol = 1,align = "hv",
+                  heights = c(1, 1), labels = c("A", "C"),
+                  hjust = 0.05, font.label = list(size = 10))
+
+ggsave(
+      filename = "plots/temp_curves/combined_avg_curveOnly_r_pca.png"
+      ,
+      width    = 60,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300,
+      device = "png"
+    )
+
+```
+
+## TPC with Yeild (K)
+
+```{r fit temperature curves with K, message=FALSE, warning=FALSE, echo=FALSE}
+# Filter out strains with too many zero values
+
+
+
+d_filtered_k <- d %>%
+  group_by(strain, date) %>%
+  filter(sum(rate == 0) / n() < 0.5) %>% # Remove strains with 25% or more zero values
+  ungroup() |>
+  mutate(strain.date = paste(strain, date, sep = ".")) |>
+  select(-c(#strain, date,
+            r_sd, rate, k_sd)) |>
+  rename(rate = k_mean) |>
+  relocate(strain.date, .before = 1)
+
+# Filter out strains with too many zero values and keep them for later analysis
+d_filtered_out <- d %>%
+  group_by(strain, date) %>%
+  filter(sum(rate == 0) / n() > 0.5) %>% # Remove strains with 25% or more zero values
+  ungroup()
+
+d_filtered_k |>
+  filter(temp  %in% c(4,9))
+
+
+# Set up progress bar
+number_of_models <- 5
+number_of_curves <- length(unique(d_filtered$strain.date))
+pb <- progress::progress_bar$new(total = number_of_curves * number_of_models,
+                                 clear = T,
+                                 format = "[:bar] :percent :elapsedfull")
+
+set.seed(711)
+# Fit models
+
+d_fits_k <- d_filtered_k %>%
+  nest(data = c(temp, rate)) %>%
+  mutate(
+    sharpeschoolhigh = map(data, ~ {
+      start_vals <- get_start_vals(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      lower_lims <- get_lower_lims(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      upper_lims <- get_upper_lims(.x$temp, .x$rate, model_name = 'sharpeschoolhigh_1981')
+      
+      nls_multstart_progress(
+        rate ~ sharpeschoolhigh_1981(temp = temp, r_tref, e, eh, th, tref = 20),
+        data = .x,
+        iter = c(3, 3, 3, 3),
+        start_lower = pmax(start_vals - 1, lower_lims),
+        start_upper = pmin(start_vals + 1, upper_lims),
+        lower = lower_lims,
+        upper = upper_lims,
+        supp_errors = 'Y',
+        convergence_count = FALSE
+      )
+    }),
+    sharpeschoolfull = map(data, ~ {
+      start_vals <- get_start_vals(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      lower_lims <- get_lower_lims(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      upper_lims <- get_upper_lims(.x$temp, .x$rate, model_name = 'sharpeschoolfull_1981')
+      nls_multstart_progress(
+        rate ~ sharpeschoolfull_1981(temp = temp, r_tref, e, el, tl, eh, th, tref = 20),
+        data = .x,
+        iter = rep(3, 6),
+        start_lower = pmax(start_vals - 1, lower_lims),
+        start_upper = pmin(start_vals + 1, upper_lims),
+        lower = lower_lims,
+        upper = upper_lims,
+        supp_errors = 'Y',
+        convergence_count = FALSE
+      )
+    }),
+    pawar = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, model_name = "pawar_2018")
+      ll <- get_lower_lims(.x$temp, .x$rate, model_name = "pawar_2018")
+      ul <- get_upper_lims(.x$temp, .x$rate, model_name = "pawar_2018")
+      nls_multstart_progress(
+        rate ~ pawar_2018(temp = temp, r_tref, e, eh, th, tref = 20),
+        data        = .x,
+        iter        = rep(3, length(sv)),
+        start_lower = sv - 5,
+        start_upper = sv + 5,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    }),
+    johnsonlewin   = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, "johnsonlewin_1946")
+      ll <- get_lower_lims(.x$temp, .x$rate, "johnsonlewin_1946")
+      ul <- get_upper_lims(.x$temp, .x$rate, "johnsonlewin_1946")
+      nls_multstart_progress(
+        rate ~ johnsonlewin_1946(temp = temp, r0, e ,eh, topt),
+        data        = .x,
+        iter        = rep(4, length(sv)),
+        start_lower = sv - 2,
+        start_upper = sv + 2,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    }),
+      weibull        = map(data, ~ {
+      sv <- get_start_vals(.x$temp, .x$rate, "weibull_1995")
+      ll <- get_lower_lims(.x$temp, .x$rate, "weibull_1995")
+      ul <- get_upper_lims(.x$temp, .x$rate, "weibull_1995")
+      nls_multstart_progress(
+        rate ~ weibull_1995(temp = temp, a, topt, b, c),
+        data        = .x,
+        iter        = rep(4, length(sv)),
+        start_lower = sv - 1,
+        start_upper = sv + 1,
+        lower       = ll,
+        upper       = ul,
+        supp_errors = "Y",
+        convergence_count = FALSE
+      )
+    })
+  )
+
+
+
+error_rows_k <- d_fits_k %>%
+  filter(
+    map_lgl(sharpeschoolhigh, is.null) |
+    map_lgl(sharpeschoolfull,   is.null) |
+    map_lgl(pawar,          is.null) |
+    map_lgl(johnsonlewin,          is.null) |
+    map_lgl(weibull,          is.null) #|
+    #map_lgl(briere2,          is.null)
+    )
+
+successful_fits_k <- d_fits_k %>%
+  filter(
+    !map_lgl(sharpeschoolhigh, is.null) |
+    !map_lgl(sharpeschoolfull,   is.null) |
+    !map_lgl(pawar,          is.null) |
+    !map_lgl(johnsonlewin,          is.null) |
+    !map_lgl(weibull,          is.null)
+    )
+
+# Print summary of errors
+print("Rows with fitting errors:")
+print(error_rows)
+```
+
+```{r fitted temperature curves analysis k, message=FALSE, warning=FALSE, echo=FALSE}
+# 1. Pivot to long: one row per strain × model
+d_long_k <- successful_fits_k %>%
+  pivot_longer(
+    cols      = sharpeschoolhigh:weibull,     # or your five model columns
+    names_to  = "model",
+    values_to = "fit"
+  ) %>%
+  filter(!map_lgl(fit, is.null))             # drop failed fits
+
+# 2. Compute AIC, AICc, BIC, sigma, df.resid
+d_stats_k <- d_long_k %>%
+  mutate(
+    # glance() gives AIC, BIC, sigma, df.resid, etc.
+    glance = map(fit, broom::glance),
+    AICc   = map_dbl(fit, MuMIn::AICc)
+  ) %>%
+  unnest(glance) %>%
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = FALSE       # keep the original strain.date if you still need it
+  ) %>%
+  select(strain, strain.date, model, AIC, AICc, BIC, sigma, df.residual)
+
+# 3. Within each strain, compute ΔAICc and Akaike weight
+d_compare_k <- d_stats_k %>%
+  group_by(strain.date) %>%
+  mutate(
+    delta  = AICc - min(AICc),
+    weight = exp(-0.5 * delta) / sum(exp(-0.5 * delta))
+  ) %>%
+  arrange(strain, delta) %>%
+  ungroup()
+
+# 4a. “Best” model per strain
+best_by_strain_k <- d_compare_k %>%
+  filter(delta == 0) %>%
+  select(strain, strain.date, best_model = model, AICc, weight)
+
+overall_k <- d_compare_k %>%
+  group_by(model) %>%
+  summarise(
+    prop_best   = mean(delta == 0),
+    mean_weight = mean(weight)
+  ) %>%
+  arrange(desc(prop_best), desc(mean_weight))
+
+print(overall_k)
+
+# 4b. (Optional) Full model‐averaged prediction or parameters
+#    You can join `weight` back onto your predictions or 
+#    onto rTPC::calc_params() output and take weighted averages.
+
+# === Examples of exploring the results ===
+
+# How many strains picked each model?
+best_by_strain_k %>%
+  count(best_model) |>
+  mutate(percent = (n/sum(n))*100)
+
+
+# 1. See exactly which rows are infinite
+d_compare_k %>% 
+  filter(!is.finite(AICc)) %>% 
+  count(model) %>% 
+  arrange(desc(n)) 
+
+# Peek at means
+d_compare_k %>% 
+  filter(is.finite(AICc)) |>
+  group_by(model) |>
+  summarise(mean = mean(AICc, na.rm = T),
+            sd   = sd(AICc, na.rm = T),
+            n    = n())
+
+hist(d_compare_k$delta[d_compare_k$model == "sharpeschoolfull"], breaks = 100)
+
+# Visualize ΔAICc distributions
+ggplot(d_compare_k, aes(model, delta)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = expression(Delta~AIC[c]), x = NULL)
+
+hist(d_compare_k$AICc[d_compare_k$model == "sharpeschoolfull"])
+
+# Visualize AICc distributions
+ggplot(d_compare_k, aes(model, AICc)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = "AICc", x = NULL)
+
+
+# -----------------------------------------------------------------------------
+# 2. Compute fit statistics & Akaike weights
+# -----------------------------------------------------------------------------
+d_stats_k <- d_stats_k %>%
+  group_by(strain.date) %>%
+  mutate(
+    delta  = AICc - min(AICc),
+    weight = exp(-0.5 * delta) / sum(exp(-0.5 * delta))
+  ) %>%
+  arrange(strain, delta) %>%
+  ungroup()
+
+
+best_by_strain_k <- d_stats_k %>%
+  filter(delta == 0) %>%
+  select(strain, strain.date, best_model = model, best_AICc = AICc)
+
+# -----------------------------------------------------------------------------
+# 3. Extract TPC trait parameters and do model-averaging vs best-model
+# -----------------------------------------------------------------------------
+
+params_long_k <- d_long_k %>%
+  mutate(params = map(fit, calc_params, .progress = T)) %>%
+  select(strain.date, model, params) %>%
+  unnest(params) |>
+  pivot_longer(
+    cols      = c(rmax, topt, ctmin, ctmax, e, eh, q10,
+                  thermal_safety_margin, thermal_tolerance,
+                  breadth, skewness),
+    names_to  = "term",
+    values_to = "estimate"
+  )
+# → columns: strain, model, term, estimate
+
+
+```
+
+```{r model-avg-params-and-preds k, message=FALSE, warning=FALSE, echo=FALSE}
+# 4b) augment each fit
+d_preds_k <- d_long_k %>%
+  left_join(pred_grids, by = "strain.date") %>%
+  mutate(preds = map2(fit, newdata, ~ augment(.x, newdata = .y), .progress = T)) %>%
+  select(strain.date, model, preds) %>%
+  unnest(preds)
+
+# 4c) join weights and best‐model info
+d_preds_k <- d_preds_k %>%
+  left_join(d_stats_k %>% select(strain, strain.date, model, weight), by = c("strain.date","model")) %>%
+  left_join(best_by_strain_k, by = "strain.date")
+
+# 4e) extract best‐model prediction
+best_preds_k <- d_preds_k %>%
+  filter(model == "sharpeschoolfull") %>%
+  select(strain.date, temp, best_fitted = .fitted) |>
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = FALSE       # keep the original strain.date if you still need it
+  ) %>%
+  # (optionally) turn your date string into a real Date
+  mutate(
+    date = as.Date(date)
+  )
+
+# -----------------------------------------------------------------------------
+# Now you have:
+# - compare_params: per‐strain, per‐trait avg vs best
+# - avg_preds & best_preds: per‐strain fitted curves
+# -----------------------------------------------------------------------------
+```
+
+### Plot predictions and observations
+
+```{r preds k , message=FALSE, warning=FALSE, echo=FALSE}
+
+preds_k <- merge(best_preds_k, clade_info,
+               by.x = "strain", by.y = "StrainID", all.x = T) |>
+  filter(!is.na(subclade))
+
+d_filtered_wmd_k <- merge(d_filtered_k |> separate(
+                                col    = strain.date,
+                                into   = c("strain","date"),
+                                sep    = "\\.",      # split on dot
+                                extra  = "merge",    # if there are more dots, merge them into the last column
+                                remove = FALSE),     # keep the original strain.date if you still need it
+                        clade_info,
+                        by.x = "strain", by.y = "StrainID", all.x = T
+                        ) |>
+  left_join(d |> select(strain,
+                        date,
+                        temp,
+                        k_sd),
+            by = c("strain", "date", "temp")) |>
+  filter(!is.na(subclade))
+
+```
+
+We can then plot the predictions of each curve using **ggplot2**.
+
+```{r plot fitted thermal curves k, fig.height = 12, fig.width=8, message=FALSE, warning=FALSE, echo=FALSE}
+
+ ## plot top subclades
+plot_temp_curves(
+  preds          = preds_k,
+  observed       = d_filtered_wmd_k,
+  all_data       = all.data,
+  strain_cols    = strain_subclade_col,
+  subclades      = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
+  facet_by_clade = FALSE,
+  filename       = "plots/temp_curves_topSubclades_k.png",
+  nrow           = 1,
+  width_mm       = 300,
+  height_mm      = 75
+)
+
+ ## plot all subclades
+plot_temp_curves(
+  preds          = preds_k,
+  observed       = d_filtered_wmd_k,
+  all_data       = all.data,
+  strain_cols    = strain_subclade_col,
+  subclades      = NULL,
+  facet_by_clade = T,
+  filename       = "plots/temp_curves.png",
+  nrow           = 1
+)
+
+
+  correct_order <- c(
+  "IA", "IB", "IC",
+  "IIA", "IIB", "IIC", "IID", "IIE", "IIF", "IIG", "IIH", "IIJ", "IIK",
+  "IIIA", "IIIB", "IIIC", "IIID", "IIIE", "IIIF",
+  "IVA", "IVB", "IVC", "IVD", "IVE",
+  "VA"
+)
+
+preds_k <- preds_k |> mutate(subclade = factor(subclade, levels = correct_order))
+
+
+for (subcld in c("IA", "IB", "IC",
+                 "IIE", "IIG", "IIJ",
+  "IIIA", "IIIB", "IIID", "IIIE",
+  "IIIF",
+  "IVA", "IVB", "IVC", "IVE", NA)) {
+  
+   # get all strains in this subclade
+  all_strains <- preds_k %>%
+    filter(subclade == subcld) %>%
+    pull(strain) %>%
+    unique() %>%
+    sort()
+  
+   # split into chunks of up to 20
+  strain_chunks <- split(all_strains, 
+                         ceiling(seq_along(all_strains) / 20))
+  
+  # loop over each chunk (page)
+  for (i in seq_along(strain_chunks)) {
+    this_strains <- strain_chunks[[i]]
+    
+    temp_curve <- preds_k %>%
+      filter(subclade == subcld, strain %in% this_strains) |> 
+  ggplot(aes(x = temp,
+                    color = strain,
+                    group = strain.date,
+                    y = best_fitted)) +
+  scale_color_manual(values = strain_subclade_col, guide = "none") +
+  geom_line(alpha = 1, linewidth = 2) +
+  geom_point(data = d_filtered_wmd_k %>% filter(subclade == subcld,
+                                              strain %in% this_strains),
+             aes(temp, rate, color = strain, shape = date), alpha = 0.75, size = 5) +
+  scale_shape_discrete(name = "Date") +
+  #geom_smooth(aes(fill = strain)) +
+  #scale_fill_manual(values = strain_clade_col) +
+  geom_errorbar(data = d_filtered_wmd_k %>% filter(subclade == subcld,
+                                              strain %in% this_strains),
+                  aes(x = temp, ymin = rate-k_sd, ymax = rate+k_sd, color = strain),
+                  width = .4, inherit.aes = F, alpha = 0.65) +
+  scale_x_continuous(breaks = sort(unique(all.data$Temp))) +
+  ggh4x::facet_nested_wrap(.~strain, ncol = 4) +
+  ylim(0, 0.65) +
+  labs(title = paste("Subclade", subcld, "(page", i, "of", length(strain_chunks), ")")
+       #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))
+       ) +
+  labs(y = expression("Yield (OD" [600] * ")")) +
+  xlab("Temperature (ºC)") +
+  apatheme +
+  theme(
+        panel.grid.major.x = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.major.y = element_line(color = "grey85", linetype = "dashed"),
+        panel.grid.minor   = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        legend.position    = "bottom",
+        legend.box         = "horizontal",
+        axis.text.y = element_text(size = 20),
+        strip.background = element_blank(),
+        text = element_text(size = 35),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 24 ),
+        plot.subtitle = element_text(color = "black", size = 16))
+    
+  print(temp_curve)
+  
+  # now save it
+    fn <- sprintf("plots/temp_curves/temp_curves_k_%s_page%02d.png", subcld, i)
+    ggsave(
+      filename = fn,
+      plot     = temp_curve,
+      width    = 600,
+      height   = 350,
+      units    = "mm",
+      dpi      = 300
+    )
+  }
+}
+
+
+
+    
+    
+    
+preds_avg_k <- preds_k |>
+  filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND"))) |>
+  group_by(subclade, temp) |>
+  summarise(avg_k = mean(best_fitted))
+
+
+
+
+
+### first recode subclade IB
+temp_curve_avg_k <- preds_k %>%
+    filter(!(
+      (strain == "32G3B09" & date == "2024-03-14") |
+      (strain == "39G1A09" & date == "2024-03-14") |
+      (strain == "39G1A10" & date == "2024-03-14") |
+      (strain == "30G3A10" & date == "2024-04-15") |
+      (strain == "33G2A09" & date == "2024-04-15") |
+      (strain == "35G4A05" & date == "2024-04-15") |
+      (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+      (strain == "28G1A03" & date == "2024-03-14") |
+      (strain == "28G1B05" & date == "2024-03-14") |
+      (strain == "28G4A04" & date == "2024-03-14") |
+      (strain == "35G1A07" & date == "2024-03-14") |
+      (strain == "39G1A08" & date == "2024-03-14") |
+      (strain == "30D10" & date == "2024-03-14") |
+      (strain == "23G1B05" & date == "2024-03-14") |
+      (subclade == "IIIE" & date == "2024-04-15") |
+      (strain == "30G1B03" & date == "2024-03-14") |
+      (strain == "23G1B05" & date == "2024-03-14") |
+      (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+      (strain == "36G2A07" & date == "2024-03-14") |
+      (strain == "36G3B02" & date == "2024-03-14") |
+      (strain == "36G3B05" & date == "2024-03-14") |
+      (strain == "37G4A03" & date == "2024-03-14") |
+      (clade == "UND"))) |>
+      filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) |>
+      ggplot(aes(x = temp,
+                        color = strain,
+                        group = strain.date,
+                        y = best_fitted)) +
+      geom_line(alpha = 0.25, linewidth = 0.1) +
+      scale_color_manual(values = strain_clade_col, guide = "none") +
+      # 2) tell ggplot we want a *new* colour scale
+      ggnewscale::new_scale_color() +
+      geom_smooth(data = preds_avg_k |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                 aes(temp, avg_k, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = T) +
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_col) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_col) +
+      scale_x_continuous(breaks = seq(4,46, 6)) +
+      ylim(0, 0.5) +
+      facet_wrap(.~ subclade, nrow = 1) +
+      #labs(title = "Temperature performance",
+           #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))) +
+      #ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
+      ylab(expression("Yield (OD" [600] * ")")) +
+      xlab("Temperature (ºC)") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 4.5),
+            axis.text.y = element_text(size = 6),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            #strip.text.x = element_blank(),
+            plot.title = element_text(color = "black", size = 18),
+            plot.subtitle = element_text(color = "black", size = 16),
+            legend.position = "none",
+            #legend.position = c(0.95,0.85),
+            #legend.justification = c(1, 1),         # anchor legend’s top-right corner
+    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
+                                        colour = NA),
+    legend.title         = element_text(size = 5),
+    legend.text          = element_text(size = 4),
+    legend.margin        = margin(rep(1,4)))
+print(temp_curve_avg_k)
+
+
+ggsave(
+      filename = "plots/temp_curves/temp_curves_avg_topSubclades_k.png",
+      width    = 140,
+      height   = 80,
+      units    = "mm",
+      dpi      = 300
+    )
+  
+
+```
+
+#### Thermal performance parameters
+
+The traits of each thermal performance curve can also easily be
+calculated.
+
+```{r params k, message=FALSE, warning=FALSE, echo=FALSE}
+# stack models and calculate extra params
+d_params_k <- pivot_longer(d_fits_k, names_to = 'model_name', values_to = 'fit',
+                         c(sharpeschoolhigh,sharpeschoolfull,pawar)) %>%
+  mutate(params = map(fit, calc_params, .progress = T)) %>%
+  select(strain.date, model_name, params) %>%
+  unnest(params) %>%
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = F       # keep the original strain.date if you still need it
+  ) %>%
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T)
+
+glimpse(d_params_k)
+
+d_params_k <- d_params_k |>
+   filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND")))
+
+d_params_k <- d_params_k %>% filter(!is.na(clade))
+
+
+d_params_ssfull_k <- d_params_k %>%
+  filter(model_name == "sharpeschoolfull") %>%
+  select(strain, date, strain.date, rmax, ctmin, ctmax, topt, breadth) %>%
+  filter(date != "2024-01-14") |>
+  select(-c(date)) %>%
+  tibble::column_to_rownames("strain.date")
+
+d_params_ssfull_k[sapply(d_params_ssfull_k, is.infinite)] <- NA
+
+pca_k <-prcomp(na.omit(d_params_ssfull_k) %>% filter(!strain %in% c("09D09", "23G4B04")) |> select(-strain)
+             ,
+             scale. = T, center = T)
+
+
+pca.df_k <- data.frame(pca_k$x) %>%
+  select(PC1, PC2) %>%
+  tibble::rownames_to_column("strain.date") |> 
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # keep the original strain.date if you still need it
+  ) %>%
+    merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T)
+
+PCAloads_k<-data.frame(Variables = rownames(pca.df_k$rotation), pca.df_k$rotation)
+
+pca_plot_k<-ggplot(pca.df_k #%>% filter(Row.names != "23G4B04")
+                 , aes(PC1, PC2)) +
+  geom_point(data = pca.df, aes(color = subclade),  size = 5, alpha = 0.5) +
+  #geom_text(data = pca.df, aes(x=PC1, y=PC2-0.15), label=pca.df$Row.names, size=2.75) +
+  scale_color_manual(values = subclade_col, name="Clade") +
+  geom_segment(data = PCAloads,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               arrow = arrow(length = unit(0.3, "cm")),
+               colour="grey", inherit.aes = FALSE) +
+ geom_text(data=PCAloads,
+           aes(x=PC1*2.5, y=PC2*2.5, label=Variables),
+           size=6,
+           colour = "darkblue") +
+  xlab(paste0("PC1 (",round(summary(pca_k)$importance[2,1] * 100, 2),"%)")) +
+  ylab(paste0("PC2 (",round(summary(pca_k)$importance[2,2] * 100, 2),"%)")) +
+  theme_bw() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), text = element_text(size = 18))
+pca_plot_k
+
+summary(pca_k)
+
+
+d_params_ssfull_topSubclades_k <- d_params_k %>%
+  filter(model_name == "sharpeschoolfull") %>%
+  filter(!strain %in% c("09D09", "23G4B04")) |>
+  filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVC")) |>
+  select(date, strain.date, ctmin, ctmax, topt, breadth) %>%
+  filter(date != "2024-01-14") |>
+  select(-c(date)) %>%
+  tibble::column_to_rownames("strain.date")
+
+pca_k_topSubclades <-prcomp(na.omit(d_params_ssfull_topSubclades_k), scale. = T, center = T)
+
+pca_k_topSubclades_df <- data.frame(pca_k_topSubclades$x) %>%
+  select(PC1, PC2) %>%
+  tibble::rownames_to_column("strain.date") |> 
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # keep the original strain.date if you still need it
+  ) %>%
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T)
+
+PCAloads_k_topSubclades <- data.frame(Variables = rownames(pca_k_topSubclades$rotation),
+                                      pca_k_topSubclades$rotation) |>
+                                        mutate(Variables = recode(Variables,
+                                                        "ctmin" = "Min. Temp",
+                                                        "topt" = "Opt. Temp",
+                                                        "ctmax" = "Max. Temp",
+                                                        "breadth" = "Breadth"))
+
+
+pca_plot.k_topSubcladesl<-ggplot(pca_k_topSubclades_df
+                 , aes(PC1, PC2)) +
+  geom_point(data = pca_k_topSubclades_df, aes(color = subclade),  size = 2, alpha = 0.75) +
+  scale_color_manual(values = subclade_col, name="Subclade") +
+  geom_segment(data = PCAloads_k_topSubclades,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               colour="grey", inherit.aes = FALSE) +
+ geom_label(data=PCAloads_k_topSubclades,
+           aes(x=PC1*2.5, y=PC2*2.5, label=Variables),
+           size=2,
+           colour = "darkblue") +
+  lims(x = c(-4,4),
+       y = c(-3,3)) +
+  xlab(paste0("PC1 (",round(summary(pca_k_topSubclades)$importance[2,1] * 100, 2),"%)")) +
+  ylab(paste0("PC2 (",round(summary(pca_k_topSubclades)$importance[2,2] * 100, 2),"%)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 10),
+        legend.position = "inside",
+        legend.position.inside = c(0.85, 0.85),
+        legend.background = element_rect(fill = alpha("white", 0), color = NA),
+        legend.key.size = unit(0.5, "lines"),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7),
+        legend.key.height = unit(0.5, "lines"),
+        legend.key.width = unit(0.8, "lines"),
+        legend.spacing.y = unit(0.1, "cm"))
+pca_plot.k_topSubcladesl
+
+ggsave(
+      filename = "plots/pca_plot.ssfull_topSubclades_k.pdf",
+      plot     = pca_plot.k_topSubcladesl,
+      width    = 90,
+      height   = 90,
+      units    = "mm",
+      dpi      = 300,
+      device = cairo_pdf
+    )
+
+# pick a handful of key traits
+traits <- c("rmax", "ctmax", "topt", "breadth")
+
+d_params_ssfull_k %>%
+  # merge with clade info
+  merge(., clade_info, by.x = "strain", by.y = "StrainID", all.x = T) |>
+  filter(clade != "UND") |>
+  filter(!is.na(subclade)) |> 
+  # raname coulumn row.names to strain
+  #rename(strain = Row.names) |>
+  # select columns of interest
+  select(strain, clade, subclade, all_of(traits)) %>%
+  # pivot longer for plotting
+  pivot_longer(cols = traits, names_to = "term", values_to = "value") %>%
+  # plot 
+  ggplot(aes(subclade, value, fill = subclade)) +
+    geom_boxplot() +
+    scale_fill_manual(values = subclade_col, name="Subclade") +
+    ggh4x::facet_nested_wrap(~ term + clade, scales = "free", ncol = 4) +
+    ggpubr::stat_compare_means(aes(label = ..p.signif..), method = "kruskal.test") +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    labs(x = "Subclade", y = "Estimate", title = "Trait differences among Subclades")
+
+
+
+### dot plots ####
+
+out_k <- plot_traits_subclade(
+  params_df = d_params_ssfull_k,
+  clade_info = clade_info,
+  traits = c("breadth","ctmax","topt"),
+  subclades = c("IC","IIG","IIIA","IIIE","IVB","IVE"),
+  #subclades = NULL,                 # or c("IC","IIG","IIIA","IIIE","IVB","IVE")
+  #exclude_subs = c("IIIB","IVA"),
+  subclade_levels = c("IC","IIG","IIIA","IIIE","IVB","IVE"),
+  facet_by_clade = F,
+  flip = T,
+  term_labels = c(
+    topt  = "Opt. Temp.",
+    ctmax  = "Max. Temp.",
+    breadth = "Breadth (Temp)"
+  ),
+  show_annotations = "both",
+  omnibus_in_clade = "I",           # show omnibus star in clade I row
+  subclade_col = subclade_col,      # named vector of colours
+  filename = here("output/temp/plots/curve_params_dotplot_Subclades_flip_k.png"),
+  width_mm = 180, height_mm = 120, dpi = 300
+)
+
+
+
+
+ggpubr::ggarrange(temp_curve_avg_k, out$plot,
+                  ncol = 1,align = "hv",
+                  heights = c(1, 1.5), labels = "AUTO",
+                  hjust = 0.05, font.label = list(size = 10))
+
+ggsave(
+      filename = "plots/temp_curves/combined_avg_params_k.png"  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
+      ,
+      width    = 100,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+```
+
+#### Fitting curves for Yeild (K) with LOESS
+
+##### Temperature curves parameters calculation
+
+Now we can calculate the pH curves parameters for each strain:
+
+1.  Area under the curve
+2.  Range
+3.  Optimal pH
+
+```{r calculate curve paramters, message=TRUE, warning=TRUE}
+library(pracma)
+
+head(d)
+
+#write.table(random_data[, c(1:3)], file = "rTPC_test_data.tsv", row.names = FALSE, quote = F, sep = "\t")
+
+# Function to calculate area under the curve for each strain
+calculate_auc <- function(data) {
+  if (nrow(data) == 0) {
+    return(data.frame(strain = NA, area_under_curve = NA))
+  }
+  
+  loess_model_k <- loess(k_mean ~ temp, data = data)
+  predicted_values_k <- predict(loess_model_k, data$temp)
+  area_under_curve_k <- trapz(data$temp, predicted_values_k)
+  return(data.frame(strain = unique(data$strain),
+                    date = unique(data$date),
+                    area_under_curve_k = area_under_curve_k))
+}
+
+# Group by strain and calculate area under the curve for each strain
+result_auc <- d %>%
+  group_by(strain, date) %>%
+  group_split() %>%
+  lapply(calculate_auc) %>%
+  bind_rows()
+
+# Print the result data frame
+print(result_auc)
+
+
+# Function to calculate max r_mean and its corresponding pH for each strain
+get_max_k_mean <- function(data) {
+  # Fit the loess model
+  loess_model_k <- loess(k_mean ~ temp, data = data)
+  
+  # Predict values for a range of x-values
+  predicted_values_k <- predict(loess_model_k, data$temp)
+  
+  # Find the index of the maximum r_mean value
+  max_index_k <- which.max(predicted_values_k)
+  
+  # Get the corresponding pH value at the maximum r_mean
+  max_temp_k <- data$temp[max_index_k]
+  
+  # Get the maximum r_mean value
+  max_k_mean <- predicted_values_k[max_index_k]
+  
+  # Return a data frame with the results
+  data.frame(strain = unique(data$strain),
+             date = unique(data$date),
+             opt_temp_k = max_temp_k,
+             max_k_mean = max_k_mean)
+}
+
+# Apply the function for each strain in the result_df
+max_k_mean_results <- d %>%
+  group_by(strain, date) %>%
+  do(get_max_k_mean(.))
+
+# Print the results
+print(max_k_mean_results)
+
+
+
+result_range_k <- d %>%
+  filter(k_mean != 0) %>%
+  group_by(strain, date) %>%
+  summarise(min_temp_k = min(temp),
+            max_temp_k = max(temp),
+            breadth_k = max(temp) - min(temp))
+
+print(result_range_k)
+
+
+
+curve_params <- merge(result_auc, max_k_mean_results, by = c("strain", "date")) %>%
+  merge(., result_range_k, by = c("strain", "date")) |>
+  left_join(clade_info, by = c("strain" = "StrainID")) |>
+  filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND") | is.na(clade)),
+    date != "2024-01-14")
+
+#write.table(as.data.frame(curve_params$strain), file = "~/SyncFolder/CA_curto/isolates/fastANI_out_WI/working_isolates.tsv", row.names = FALSE, quote = F, sep = "\t")
+
+#write.table(as.data.frame(curve_params |>
+#                            select(strain) |>
+#                            rename(StrainID = strain) |>
+#                            mutate(pH = "yes")),
+#            file = "~/SyncFolder/CA_curto/phys_assays/pH/pH_strain_table.txt", row.names = FALSE, quote = #F, sep = "\t")
+
+
+#write.table(curve_params, file = "curve_params.tsv", row.names = FALSE, quote = F, sep = "\t")
+
+
+### PCA of curve parameters
+curve_params <- curve_params %>%
+  mutate(strain.date = paste(strain, date, sep = ".")) |> tibble::column_to_rownames("strain.date")
+
+
+k_traits <- c(colnames(curve_params |> select(ends_with("_k") & !starts_with("area"))), "max_k_mean")
+
+pca <-prcomp(curve_params |>
+               filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVC")) |>
+               select(all_of(k_traits))
+             , scale. = T, center = T)
+
+
+pca.df <- data.frame(pca$x) %>%
+  select(PC1, PC2) %>%
+  tibble::rownames_to_column("strain.date") |> 
+  separate(
+    col    = strain.date,
+    into   = c("strain","date"),
+    sep    = "\\.",      # split on dot
+    extra  = "merge",    # if there are more dots, merge them into the last column
+    remove = T       # keep the original strain.date if you still need it
+  ) |> left_join(clade_info, by = c("strain" = "StrainID"))
+
+pca.df$clade_color <- clade_colors$color[match(pca.df$clade, clade_colors$variable)]
+pca.df$subclade_color <- clade_colors$color[match(pca.df$subclade, clade_colors$variable)]
+PCAloads <- data.frame(Variables = rownames(pca$rotation), pca$rotation) |>
+  mutate(Variables = recode(Variables,
+                            "min_temp_k" = "Min. temp.",
+                            "opt_temp_k" = "Opt. temp.",
+                            "max_temp_k" = "Max. temp.",
+                            "max_k_mean" = "Yeild",
+                            "breadth_k" = "Breadth"))
+
+pca_plot<-ggplot(pca.df
+                 , aes(PC1, PC2)) +
+  geom_point(data = pca.df, aes(color = subclade),  size = 5, alpha = 0.75) +
+  #geom_text(data = pca.df, aes(x=PC1, y=PC2-0.15), label=pca.df$Row.names, size=2.75) +
+  scale_color_manual(values = subclade_col, name="Subclade") +
+  geom_segment(data = PCAloads,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               arrow = arrow(length = unit(0.3, "cm")),
+               colour="grey", inherit.aes = FALSE) +
+ ggrepel::geom_label_repel(data=PCAloads,
+           aes(x=PC1*2.5, y=PC2*2.5, label=Variables),
+           size=4,
+           colour = "darkblue") +
+ #annotate("text", x = -7.5 , y = -6, label = "Stress = 0.1", size = 3.5) +
+ #annotate("text", x = -7.5, y = -6.5, label = "[PERMANOVA ~ Site: F = 3.28, P < 0.001]", size = 3.5) +
+  xlab(paste0("PC1 (",round(summary(pca)$importance[2,1] * 100, 2),"%)")) +
+  ylab(paste0("PC2 (",round(summary(pca)$importance[2,2] * 100, 2),"%)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), text = element_text(size = 18))
+pca_plot
+
+summary(pca)
+
+
+### dot plots ####
+
+out_k_loess <- plot_traits_subclade(
+  params_df = curve_params |> select(strain, all_of(k_traits)),
+  clade_info = clade_info,
+  traits = k_traits,
+  subclades = c("IC","IIG","IIIA","IIIE","IVB","IVE"),
+  #subclades = NULL,                 # or c("IC","IIG","IIIA","IIIE","IVB","IVE")
+  #exclude_subs = c("IIIB","IVA"),
+  subclade_levels = c("IC","IIG","IIIA","IIIE","IVB","IVE"),
+  facet_by_clade = F,
+  flip = T,
+  term_labels = c(
+    opt_temp_k  = "Opt. Temp.",
+    max_temp_k  = "Max. Temp.",
+    min_temp_k = "Min. Temp.",
+    breadth_k = "Breadth",
+    max_k_mean = "Yeild"
+  ),
+  show_annotations = "both",
+  omnibus_in_clade = "I",           # show omnibus star in clade I row
+  subclade_col = subclade_col,      # named vector of colours
+  filename = here("output/temp/plots/curve_params_dotplot_Subclades_flip_k_loess.png"),
+  width_mm = 180, height_mm = 120, dpi = 300
+)
+
+
+
+
+avg_k <- d_filtered_wmd_k |>
+  filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND") | is.na(clade)),
+    date != "2024-01-14") |>
+  group_by(subclade, temp) |>
+  summarise(avg_k = mean(rate))
+
+
+temp_curve_avg_k_subclades_loess <- d_filtered_wmd_k |>
+  filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND") | is.na(clade)),
+    date != "2024-01-14") |>
+                        filter(clade != "UND" & !is.na(subclade) &
+                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) |>
+   ggplot(aes(x = temp,
+                    color = strain,
+                    group = strain,
+                    y = rate)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.1, alpha = 0.25) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = seq(4,46, 6)) +
+      # 2) tell ggplot we want a *new* colour scale
+      ggnewscale::new_scale_color() +
+      geom_smooth(data = avg_k |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                 aes(temp, avg_k, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = T) +
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_col) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_col) +
+      ylim(0, 0.4) +
+      facet_wrap(.~ subclade, nrow = 1) +
+      labs(y = expression("Yield (OD" [600] * ")")) +
+      xlab("Temperature (Cº)") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 4.5),
+            axis.text.y = element_text(size = 6),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            plot.title = element_text(color = "black", size = 18),
+            plot.subtitle = element_text(color = "black", size = 16),
+            legend.position = "none",
+    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
+                                        colour = NA),
+    legend.title         = element_text(size = 5),
+    legend.text          = element_text(size = 4),
+    legend.margin        = margin(rep(1,4)))
+print(temp_curve_avg_k_subclades_loess)
+
+ggpubr::ggarrange(temp_curve_avg_k_subclades_loess, out_k_loess$plot,
+                  ncol = 1,align = "hv",
+                  heights = c(1, 1.5), labels = "AUTO",
+                  hjust = 0.05, font.label = list(size = 10))
+
+ggsave(
+      filename = "plots/temp_curves/combined_avg_params_k_loess.png"  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
+      ,
+      width    = 100,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
+
+
+
+```
+
+######### Count of strains with acceptable data
+
+```{r count of strains, echo=FALSE, warning=FALSE, message=FALSE}
+
+### let's get a list of all strains that have been tested for temperature performance
+
+strain_table <- d_params |>
+  select(strain) |>
+  distinct() |>
+  rename(StrainID = strain) |>
+  mutate(temp = "yes")
+
+write.table(strain_table,
+            file = here("output/temp/temp_strain_table.txt"),
+            row.names = F,
+            col.names = T,
+            quote = F)
+
+
+
+### lets also export the curve parameters data for correlations
+
+
+# Rebuild the per-curve sharpeschoolfull table from the stable `d_params`.
+# NOTE: the `d_params_ssfull` object is mutated further above (a left_join
+# drops its strain.date rownames), so using it here in a clean top-to-bottom
+# render produces NA dates and an empty table. `d_params` already carries
+# clade/subclade and the per-run strain/date exclusions applied above.
+d_params_ssfull_export <- d_params |>
+  filter(model_name == "sharpeschoolfull", date != "2024-01-14") |>
+  select(strain, date, rmax, ctmin, ctmax, topt, breadth, clade, subclade)
+
+
+dups <- data.frame(StrainID = d_params_ssfull_export$strain[duplicated(d_params_ssfull_export$strain)])
+
+dups <- merge(dups, clade_info, by = "StrainID", all.x = T)
+
+d_params_ssfull_export <- d_params_ssfull_export |>
+  filter(!(
+    (strain == "32G3B09" & date == "2024-03-14") |
+    (strain == "39G1A09" & date == "2024-03-14") |
+    (strain == "39G1A10" & date == "2024-03-14") |
+    (strain == "30G3A10" & date == "2024-04-15") |
+    (strain == "33G2A09" & date == "2024-04-15") |
+    (strain == "35G4A05" & date == "2024-04-15") |
+    (strain == "23G1B05" & date == "2024-03-14") | ## might have to repeat this one for a few temps
+    (strain == "28G1A03" & date == "2024-03-14") |
+    (strain == "28G1B05" & date == "2024-03-14") |
+    (strain == "28G4A04" & date == "2024-03-14") |
+    (strain == "35G1A07" & date == "2024-03-14") |
+    (strain == "39G1A08" & date == "2024-03-14") |
+    (strain == "30D10" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (subclade == "IIIE" & date == "2024-04-15") |
+    (strain == "30G1B03" & date == "2024-03-14") |
+    (strain == "23G1B05" & date == "2024-03-14") |
+    (strain  %in%  c("26G3A01", "26G3A06") & date == "2024-04-15") |
+    (strain == "36G2A07" & date == "2024-03-14") |
+    (strain == "36G3B02" & date == "2024-03-14") |
+    (strain == "36G3B05" & date == "2024-03-14") |
+    (strain == "37G4A03" & date == "2024-03-14") |
+    (clade == "UND" & !is.na(clade)))) |>
+  select(-c(clade, subclade))
+
+
+write.table(d_params_ssfull_export,
+            file = here("output/temp/temp_curve_params_table.txt"),
+            row.names = F,
+            col.names = T,
+            quote = F)
+
+
+
+```
+
+#### Correlation distance matrix correlation
+
+For the next steep we have calculated pairwise ANI distance for all
+strains. We will calculate distance matrices for all parameters all
+together and also individually and assess the correlation at different
+ANI distances
+
+##### Distance matrix of curve parameters
+
+```{r distance matrix of curve parameters and mantel tests,  message=FALSE, warning=FALSE, echo=FALSE, fig.height = 18, fig.width=24, eval=FALSE}
+# NOTE: ANI-vs-thermal Mantel analysis disabled for now (deferred).
+# It needs NA-robust handling of curve parameters before it will run.
+library(progress)
+
+
+## Read distance data in table format
+dat <- read.table(here("data/shared/fastANI.out"), header = F, sep = "\t")
+#read in distance matrix
+dm <- as.matrix(read.table(here("data/shared/fastANI.out.matrix"), header = T, row.names = 1, sep = "\t"))
+## Let's change the NCBI identifiers for more informative identifiers. For that we need to read in the master metadata table.
+row.names(dm) <- master_md$Name[match(row.names(dm), master_md$FILE_NAME)]
+
+#Create a function to get the upper triangle of the matrix
+
+lower_to_symmetric <- function(lower_df) {
+  n <- nrow(lower_df)
+  matrix_data <- matrix(NA, nrow = n, ncol = n)
+  
+  for (i in 1:n) {
+    for (j in 1:i) {
+      matrix_data[i, j] <- lower_df[i, j]
+      matrix_data[j, i] <- lower_df[i, j]
+    }
+  }
+  
+  return(matrix_data)
+}
+
+# apply the created function to the distance matrix to get a square symmetrical matrix
+symmetric_matrix <- lower_to_symmetric(dm)
+
+# Print the resulting matrix
+#print(symmetric_matrix)
+
+#set row and column names
+row.names(symmetric_matrix) <- row.names(dm)
+colnames(symmetric_matrix) <- row.names(dm)
+
+# check that all row names in the similarity matrix are found in the master metadata
+# result should be character(0)
+setdiff(row.names(symmetric_matrix), master_md$Name)
+
+
+### now let's just select rows and columns of the matrix according to the list we just loaded
+symmetric_matrix <- symmetric_matrix[rownames(symmetric_matrix) %in% unique(d_params$strain), colnames(symmetric_matrix) %in% unique(d_params$strain)]
+setdiff(unique(d_params$strain), rownames(symmetric_matrix))
+
+# let's leave out from the analysis for now the following strains
+symmetric_matrix <- symmetric_matrix[!rownames(symmetric_matrix) %in% c("26G3B03", "28D03", "35G3B04"), !colnames(symmetric_matrix) %in% c("26G3B03", "28D03", "35G3B04")]
+## let's remove them also from the parameters table
+d_params <- d_params %>% filter(!strain %in% c("26G3B03", "28D03", "35G3B04"))
+
+## A few strains were measured on two dates; keep one row per strain within
+## each model (latest date) so `strain` can serve as unique row names below.
+d_params <- d_params |>
+  arrange(desc(date)) |>
+  distinct(model_name, strain, .keep_all = TRUE)
+
+#now let's calculate genetic distance as  distance = 100 - ANI
+gdm <- as.dist(100 - symmetric_matrix, diag = T, upper = T)
+
+
+## now let's also create the phenotypic distance matrix with the curve parameters
+## let's create a loop to calculate distance matrices for both models
+
+# Initialize lists to store distance matrices and Mantel test results
+distance_matrices_all <- list()
+mantel_results_all <- list()
+
+
+# Loop to calculate distance matrices for both models
+for (model in unique(d_params$model_name)) {
+  
+  # Filter for each model and select parameters of interest
+  z <- as.data.frame(scale(d_params %>%
+                             filter(model_name == model) %>% 
+                             select(strain, rmax, ctmax, topt) %>% 
+                             tibble::column_to_rownames("strain")))
+  
+  # Calculate distance matrix for all parameters all together
+  euc_z <- dist(z, method = "euclidean", diag = TRUE, upper = TRUE)
+  
+  distance_matrices <- list()
+  mantel_results <- list()
+  
+  for (var in colnames(d_params %>%
+                        filter(model_name == model) %>% 
+                        select(strain, rmax, ctmax, topt) %>% 
+                        tibble::column_to_rownames("strain"))) {
+    ## check for infinie values in values
+    inf_names <- d_params %>%
+      filter(model_name == model) %>%
+      tibble::column_to_rownames("strain") %>%
+      select(all_of(var)) %>%
+      filter(is.infinite(!!sym(var))) %>%
+      row.names(.)
+    
+    if (length(inf_names) == 0) {
+      
+      distance_matrices[[var]] <- dist(d_params %>%
+                                         filter(model_name == model) %>% 
+                                         tibble::column_to_rownames("strain") %>% 
+                                         select(all_of(var)),
+                                       method = "euclidean", diag = TRUE, upper = TRUE)
+      
+      # Perform Mantel test without subsetting if no Inf values are found
+      mo_var <- vegan::mantel(gdm, distance_matrices[[var]], method = "pearson", permutations = 9999)
+    }
+    
+    else {
+      distance_matrices[[var]] <- dist(d_params %>%
+                                         filter(model_name == model & !strain %in% inf_names) %>% 
+                                         tibble::column_to_rownames("strain") %>% 
+                                         select(all_of(var)),
+                                       method = "euclidean", diag = TRUE, upper = TRUE)
+      
+      # Remove the same rows and columns from gdm matrix
+      sub_gdm <- as.matrix(gdm)[!(rownames(as.matrix(gdm)) %in% inf_names), !(rownames(as.matrix(gdm)) %in% inf_names)]
+      sub_gdm <- as.dist(sub_gdm, diag = TRUE, upper = TRUE)
+      
+      # Perform Mantel test without subsetting if no Inf values are found
+      mo_var <- vegan::mantel(sub_gdm, distance_matrices[[var]], method = "pearson", permutations = 9999)
+    }
+    
+    # Store Mantel test results in the overall list
+    mantel_results[[var]] <- list(
+      statistic = mo_var$statistic,
+      significance = mo_var$signif
+    )
+  }
+  
+  # Add the distance matrix that summarizes all traits to the distance_matrices list
+  distance_matrices[["all_parameters"]] <- euc_z
+  
+  # Store the distance matrices in the overall list
+  distance_matrices_all[[model]] <- distance_matrices
+  
+  # Perform overall Mantel test
+  mo <- vegan::mantel(gdm, euc_z, method = "pearson", permutations = 9999)
+  
+  # Store Mantel test results
+  mantel_results_all[[model]] <- mantel_results
+  mantel_results_all[[model]][["all_parameters"]] <- list(
+    statistic = mo$statistic,
+    significance = mo$signif
+  )
+}
+
+# Print Mantel test results
+#print(mantel_results_all)
+
+
+# load table to find groups of different degrees of similarity
+ANI_df <- dat
+rm(dat)
+ANI_df$V1 <- master_md$Name[match(ANI_df$V1, master_md$FILE_NAME)]
+ANI_df$V2 <- master_md$Name[match(ANI_df$V2, master_md$FILE_NAME)]
+
+
+## now let's just keep the observations only for the working
+ANI_df <- ANI_df %>%
+  rename(query = V1,
+         ref = V2,
+         ANI = V3,
+         fragment_mappings = V4,
+         total_query_fragments = V5) %>%
+  filter(query %in% unique(d_params$strain) &
+           ref %in% unique(d_params$strain) &
+           !query %in% c("26G3B03", "28D03", "35G3B04") &
+           !ref %in% c("26G3B03", "28D03", "35G3B04")) %>%
+  mutate(dist = 100 - ANI) %>% # first transform ANI to distance and add to tabl
+  filter(dist != 0) #filter out identical pairs
+
+ANI_df <- ANI_df %>%
+  mutate(query_ordered = pmin(query, ref),   # Get the "minimum" of the two strings
+         ref_ordered = pmax(query, ref)) %>% # Get the "maximum" of the two strings
+  select(-query, -ref) %>%                   # Remove the original columns
+  rename(query = query_ordered, ref = ref_ordered) # Rename the ordered columns back
+
+# Remove duplicates based on the ordered pairs
+ANI_df <- ANI_df %>%
+  distinct(query, ref, .keep_all = TRUE)
+
+# Subset distances within the given range
+  #subset_df <- ANI_df %>% filter(dist > 0 & dist < 2.5)
+  
+
+
+# Function to perform Mantel test and return a data frame with results
+perform_mantel_test <- function(dist_range, gdm, euc_z, permutations = 9999) {
+  # Subset distances within the given range
+  subset_df <- ANI_df %>% filter(dist > dist_range[1] & dist < dist_range[2])
+  
+  # Get unique row and column names from the subset
+  subset_ids <- unique(c(subset_df$ref, subset_df$query))
+  
+   # Filter subset_ids to include only those present in both gdm and euc_z
+  valid_ids <- intersect(intersect(subset_ids, rownames(as.matrix(gdm))), rownames(as.matrix(euc_z)))
+  
+  # Create submatrices using the valid IDs
+  sub_gdm <- as.matrix(gdm)[valid_ids, valid_ids]
+  sub_euc_z <- as.matrix(euc_z)[valid_ids, valid_ids]
+  
+  # Ensure sub_gdm and sub_euc_z have the same dimensions and row/column names
+  common_ids <- intersect(rownames(sub_gdm), rownames(sub_euc_z))
+  sub_gdm <- sub_gdm[common_ids, common_ids]
+  sub_euc_z <- sub_euc_z[common_ids, common_ids]
+  
+  # Perform Mantel test and extract the correlation coefficient and p-value
+  mantel_result <- vegan::mantel(sub_gdm, sub_euc_z, method = "pearson", permutations = permutations)
+  
+   # Count the number of comparisons
+  num_comparisons <- length(subset_ids) * (length(subset_ids) - 1) / 2
+  # Count the number of unique strains
+  num_strains_in_range <- length(subset_ids)
+  
+  # Check if mantel_result$signif is not NULL and not NA
+  if (!is.null(mantel_result$signif) && !is.na(mantel_result$signif)) {
+    # If there are significant results, create a data frame with results
+    result_df <- data.frame(Range = paste(dist_range, collapse = "-"),
+                            Correlation_Coefficient = mantel_result$statistic,
+                            P_Value = mantel_result$signif,
+                            Num_Comparisons = num_comparisons,  # Add number of comparisons
+                            Num_strains = num_strains_in_range,
+                            stringsAsFactors = FALSE)
+  } else {
+    # If there are no significant results, create a data frame with NA values
+    result_df <- data.frame(Range = paste(dist_range, collapse = "-"),
+                            Correlation_Coefficient = NA,
+                            P_Value = NA,
+                            Num_Comparisons = num_comparisons,  # Add number of comparisons
+                            Num_strains = num_strains_in_range,
+                            stringsAsFactors = FALSE)
+  }
+  
+  return(result_df)
+}
+
+
+generate_non_overlapping_ranges <- function(start, end, step, increment = 0.0001) {
+  # Calculate the number of bins
+  num_bins <- floor((end - start) / step) + 1
+  
+  # Initialize a list to store the ranges
+  ranges <- vector("list", num_bins)
+  
+  for (i in 0:(num_bins - 1)) {
+    if (i == 0) {
+      bin_start <- start
+      bin_end <- start + step
+    } else {
+      bin_start <- ranges[[i]][2] + increment
+      bin_end <- bin_start + step - increment
+    }
+    # Round the start and end to three decimal places for clarity
+    ranges[[i + 1]] <- c(round(bin_start, 4), round(bin_end, 4))
+  }
+  
+  return(ranges)
+}
+
+# Example usage:
+distance_ranges <- generate_non_overlapping_ranges(0, 16, 1, increment = 0.0001)
+print(distance_ranges)
+
+
+# Initialize list to store Mantel test results
+mantel_gds_results <- list()
+
+# Create a progress bar
+total_tasks <- length(names(distance_matrices_all)) * length(distance_ranges) * length(names(distance_matrices_all[[1]]))
+pb <- progress_bar$new(total = total_tasks, format = "[:bar] :current/:total (:percent) :elapsedfull")
+
+# Loop over each model and perform Mantel test for each parameter distance matrix
+for (model in names(distance_matrices_all)) {
+  distance_matrices <- distance_matrices_all[[model]]
+
+  # Loop over each distance range and perform the Mantel test using lapply
+  mantel_gds_results[[model]] <- lapply(names(distance_matrices), function(mat_name) {
+    lapply(seq_along(distance_ranges), function(j) {
+      pb$tick()
+      perform_mantel_test(
+        distance_ranges[[j]],
+        gdm = gdm,  # Assuming gdm is defined elsewhere in your code
+        euc_z = distance_matrices[[mat_name]],  # Access the corresponding euc_z matrix
+        permutations = 9999
+      ) %>%
+        mutate(Parameter = mat_name, Model = model)  # Add matrix name and model name as new columns
+    })
+    }) %>%
+  unlist(recursive = FALSE) %>%
+  bind_rows()  # Combine all data frames into a single data frame
+}
+
+# Combine all Mantel test results into a single data frame
+mantel_gds_results_df <- bind_rows(mantel_gds_results)
+
+# Print the resulting data frame with Mantel test results and matrix names
+head(mantel_gds_results_df,n = 20)
+
+
+## plot ANI distance vs corr coefficient and significance
+
+# Custom label function to add model names inside the plot
+model_label <- function(variable, value) {
+  return(paste(value))
+}
+
+unique(mantel_gds_results_df$Range)
+
+# Convert 'Range' to a factor with the desired order
+mantel_gds_results_df$Range <- factor(mantel_gds_results_df$Range, levels = unique(mantel_gds_results_df$Range))
+
+# Create the plot using ggplot2
+mantel_cor_plot <- ggplot(mantel_gds_results_df %>% filter(Model != "gaussian"),
+                          aes(x = Range, y = Correlation_Coefficient, group = Parameter)) +
+  geom_line() +
+  #geom_line(color = "black", group = 1) +
+  #geom_point(size = 3, aes(shape = factor(ifelse(P_Value < 0.05, 16, 1)))) +
+  geom_point(size = 6, aes(shape = Parameter, fill = factor(ifelse(P_Value < 0.05, "significant", "non-significant")))) +
+  #scale_shape_manual(values = c("significant" = 21, "non-significant" = 21), name = "P value", labels = c("< 0.05", "> 0.05")) +
+  scale_fill_manual(values = c("significant" = "black", "non-significant" = "white"), name = "P value", labels =  c("< 0.05", "> 0.05")#, guide = guide_legend(override.aes = list(shape = 21))
+                    ) +
+  #facet_wrap(~Model, ncol = 1, scales = "free_y") +
+  scale_shape_manual(values = c("all_parameters" = 21,  # Circle
+                                "ctmax" = 22,  # Square
+                                "rmax" = 23,  # Triangle
+                                "topt" = 24),  # Diamond
+                     limits = c("all_parameters", "ctmax", "rmax", "topt"),
+                     labels = c("All", "Max. T", "rmax", "Opt. T")) +
+  #scale_shape_manual(values = c("1" = 1, "16" = 16),
+  #                   limits = c("16", "1"),
+  #                   labels = c("< 0.05", "> 0.05")) +
+  #scale_shape_manual(values = c("1" = 1, "19" = 19),
+  #                   limits = c("19", "1"),
+  #                   labels = c("< 0.05", "> 0.05")) +
+  #geom_point(color = "black", size = 3, shape = 19) +
+  #scale_color_manual(values = RColorBrewer::brewer.pal(n = 6, name = "Dark2"), labels = c("All",
+  #                                                                                        #"Breadth",
+  #                                                                                        "ctmax",
+  #                                                                                        #"ctmin",
+  #                                                                                        "rmax",
+  #                                                                                        "Opt. T")
+  #                   ) +
+  #scale_color_viridis_d(labels = c("All", "AUC", "Breadth", "Max. pH", "Max. gorwth rate", "Min. pH", "Optimal pH")) +
+  #geom_text(aes(label = ifelse(P_Value < 0.05, "*", "")), color = "black", vjust = 0, size = 8) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  ylim(0, 1) +
+  scale_x_discrete(breaks = seq(0, 17, by = 1), expand = c(0.025, 0.025)) +
+  #ggtitle(label = "Correlation between ANI distance and phenotypic distance",
+  #        subtitle = "Trait: Thermal performance") +
+  labs(x = "",
+       y = "Mantel Correlation Coefficient", shape = " Parameter", fill = "P value") +
+  #annotate("text", x = 7.5, y = 0.5, label = substitute(paste("* ", italic("p"), " < 0.05")), size = 4) +
+  apatheme +
+  theme(
+   text = element_text(size = 24),
+   legend.position = c(0.95, 0.8), # Adjust position to your preference
+   legend.background = element_rect(fill = alpha("white", 0.25)),
+   legend.box.background = element_rect(color = NA),
+   legend.text = element_text(size = 15), # Reduce legend text size
+   legend.title = element_text(size = 16), # Reduce legend title size
+   legend.key.size = unit(0.25, "lines"),
+   legend.spacing.y = unit(1, "pt"),
+   #axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), # Rotate x-axis labels for better readability
+   axis.text.x = element_blank(),
+   axis.ticks.x = element_blank(),
+   axis.line.x = element_blank(),
+   strip.background = element_blank(), # Remove facet strips
+   strip.text = element_blank() # Remove facet strip text
+ ) +
+  #geom_text(data = mantel_gds_results_df %>%
+  #            group_by(Model) %>%
+  #            summarize(y = max(Correlation_Coefficient, na.rm = TRUE) * 0.9), 
+  #          aes(x = 1, y = y, label = Model),
+  #          inherit.aes = FALSE, hjust = 0, vjust = 1, size = 4, fontface = "bold") +
+  guides(
+    fill = guide_legend(override.aes = list(shape = c(19,1), size = 5)),
+    shape = guide_legend(order = 1, override.aes = list(shape = c(19, 15, 18, 17), size = 5)) # Ensure that the shape legend appears first
+  )
+
+# Display the plot
+print(mantel_cor_plot)
+
+
+# some quick calculations
+
+avg_cl <- 7.37
+sd_cl <- 3.11
+
+ul_cl <- avg_cl + sd_cl
+ll_cl <- avg_cl - sd_cl
+
+rng_cl <- ul_cl - ll_cl
+rng_cl
+
+avg_sb <- 4.19
+sd_sb <- 2.73
+
+ul_sb <- avg_sb + sd_sb
+ll_sb <- avg_sb - sd_sb
+
+rng_sb <- ul_sb - ll_sb
+rng_sb
+
+
+
+hist_plot <- ggplot(ANI_df, aes(x = dist)) +
+  geom_histogram(binwidth = 1, fill = "black", color = "black", alpha = 0.7, boundary = 0) +
+  scale_x_continuous(breaks = seq(0, 17, by = 1), expand = c(0,0)) +
+  geom_vline(xintercept = avg_sb, color = "black", linetype = "dashed", linewidth = 1.5) +
+  #geom_vline(xintercept = ll_sb, color = "red", linetype = "dashed") +
+  #geom_vline(xintercept = ul_sb, color = "red", linetype = "dashed") +
+  geom_vline(xintercept = avg_cl, color = "black", linetype = "dashed", linewidth = 1.5) +
+  #geom_vline(xintercept = ul_cl, color = "blue", linetype = "dashed") +
+  #geom_vline(xintercept = ll_cl, color = "blue", linetype = "dashed") +
+  # Add labels for avg_cl and avg_sb
+  annotate("text", x = avg_sb, y = 3200, label = paste("Avg. subclades:", round(avg_sb, 2), sep = " "),
+           color = "black", hjust = -0.05, size = 8, angle = 0) +
+  annotate("text", x = avg_cl, y = 3200, label = paste("Avg. clades:", round(avg_cl, 2), sep = " "),
+           color = "black", hjust = -0.05, size = 8, angle = 0) +
+  labs(x = "ANI distance (%)", y = "Count") +
+  labs(x = "ANI distance (%)", y = "Count") +
+  #ggtitle("Histogram of Genetic Distances") +
+  apatheme +
+  theme(text = element_text(size = 24))
+print(hist_plot)
+
+
+
+# Combine the plots
+combined_plot <- ggpubr::ggarrange(
+  mantel_cor_plot,
+  hist_plot,
+  ncol = 1,
+  nrow = 2,
+  heights = c(3, 1),
+  align = "v"
+)
+
+print(combined_plot)
+
+ggsave("plots/ANIvsTherm_distance.png",
+       width = 50,
+       height = 16,
+       units = "cm",
+       dpi = 300)
+
+```
+
+##### Heat map
+
+```{r heatmap, eval=FALSE}
+# NOTE: disabled for now — this chunk references `d_params_schol`, which is
+# never defined in the document (separate pre-existing bug to resolve later).
+
+head(d_params)
+
+curve_params <- d_params_schol %>%
+  select(rmax, topt, ctmax)
+
+
+
+library(ggh4x)
+# Add a new column for rownames (Strain IDs)
+curve_params$strain <- rownames(curve_params)
+
+curve_params <- merge(curve_params, clade_info, by.x = "strain", by.y = "StrainID", all.x = T)
+
+# Arrange the data by the clade variable
+curve_params <- curve_params %>%
+  arrange(clade, subclade, strain)
+
+
+
+# Assuming your data is stored in a dataframe called curve_params
+# Convert the data to long format
+curve_params_long <- pivot_longer(curve_params,
+                                  cols = where(is.numeric),
+                                  names_to = "Parameter",
+                                  values_to = "Value")
+
+# Scale the data to z-scores by grouping by 'Parameter'
+curve_params_long <- curve_params_long %>%
+  group_by(Parameter) %>%
+  mutate(Value_z = scale(Value)) %>%
+  ungroup()
+
+
+clade_color_vector <- setNames(clade_colors$color, clade_colors$variable)
+
+
+# Create the heatmap
+ggplot(curve_params_long %>% filter(clade != "UND")
+       ,
+       aes(x = Parameter,
+                              y = factor(strain, levels = unique(strain)),
+                              fill = Value_z)) +
+  geom_tile() +
+  scale_fill_gradient2(#colors = c("blue", "white", "red"),
+    low = "blue", mid = "white", high = "red",
+                       #values = scales::rescale(c(-2, 0, 2)),  # Adjust these values to control the sharpness
+                       #breaks = c(-2, -1, 0, 1, 2),  # Adjust breaks for sharper transitions
+                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
+  labs(x = "Parameter", y = "Strain", fill = "Z-score") +
+  ggh4x::facet_grid2(clade ~ ., scales = "free_y", space = "fixed", switch = "y",
+              strip = ggh4x::strip_themed(
+                background_y = elem_list_rect(
+                  fill = clade_color_vector[unique(curve_params_long$clade)]
+                )
+              )) +
+  scale_x_discrete(position = "top", labels = c("Max T.", "rmax", "Opt. T.")
+                   ) +
+  apatheme +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 16, face = "bold"),  # Align text horizontally and center
+    axis.text.y = element_blank(),  # Remove y-axis text
+    axis.ticks.y = element_blank(),  # Remove y-axis ticks
+    strip.placement = "inside",  # Place facet strips outside the plot area
+    strip.text = element_text(face = "bold"),  # Bold text for facet labels
+    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
+    strip.background = element_blank(),  # Remove the default strip background
+    strip.text.y.left = element_text(angle = 0, vjust = 1, hjust = 1),  # Align facet labels on the left
+    legend.title=element_text(size=10),
+    legend.title.align = 0.5,
+    legend.text=element_text(size=9),
+    legend.position = "bottom",
+    legend.justification = "center",
+    legend.box = "horizontal",
+    legend.box.spacing = unit(0, "lines"),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    text = element_text(size = 22),
+    panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank()# Ensure the y-axis title is removed
+  ) +
+   scale_y_discrete(position = "right") 
+  # Align facet labels on the left
+
+ggsave("plots/heatmap_curve_params.png",
+       width = 6,
+       height = 14,
+       units = "cm",
+       dpi = 600)
+
+
+# 1. Make named vectors of colours for each level
+clade_cols <- c(
+  I   = "#7171FF",
+  II  = "#EEC900",
+  III = "#e31a1c",
+  IV  = "#DC89FF"
+)
+
+subclade_cols <- c(
+  IA = "#7ECFE8", IB = "#009ACD", IC = "#0000E8",
+  IIE = "#EEDC82", IIG = "#CD9B1D", IIJ = "#EEAD0E",
+  IIIA = "#FF8D8D", IIIB = "#B03060", IIID = "#8B0000", IIIF = "#8B475D",
+  IVA = "#E6C4FF", IVB = "#9300FF", IVC = "#4B0082", IVE = "#8968CD"
+)
+
+# Create the horizontal heatmap
+ggplot(curve_params_long %>% filter(clade != "UND",
+                                    !is.na(subclade)),
+       aes(x = factor(strain, levels = unique(strain)),
+           y = Parameter,
+           fill = Value_z)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
+  labs(x = "Strain", y = "Parameter", fill = "Z-score") +
+  ggh4x::facet_nested(. ~ clade + subclade, scales = "free_x", space = "fixed"
+                      ,
+                     strip = ggh4x::strip_nested(
+      background_x  = elem_list_rect(fill = c(clade_cols, subclade_cols)
+      )
+    )
+  ) +
+  scale_y_discrete(labels = c("Max T.", "rmax", "Opt. T.")) +  # Adjust the y-axis labels
+  theme_minimal() +
+  theme(
+    text = element_text(size = 22),
+    axis.text.y = element_text(angle = 0, hjust = 0.5, size = 14, face = "bold"),  # Align text horizontally and center
+    axis.text.x = element_blank(),  # Remove x-axis text (Strain)
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks (Strain)
+    strip.placement = "inside",  # Place facet strips inside the plot area
+    strip.text = element_text(face = "bold"),  # Bold text for facet labels
+    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
+    strip.background = element_blank(),  # Remove the default strip background
+    strip.text.x.top = element_text(angle = 0, vjust = 1, hjust = 0.5),  # Align facet labels on the top
+    legend.title = element_text(size = 11, margin = margin(b = 0)), 
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    legend.box = "horizontal",
+    legend.justification = "center",
+    legend.box.spacing = unit(0, "lines"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),  # Ensure the y-axis title is removed
+    #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
+  )
+
+ggsave("plots/heatmap_curve_params.png",
+       width = 27,
+       height = 4,
+       units = "cm",
+       dpi = 600)
+
+
+
+```

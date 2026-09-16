@@ -1,0 +1,609 @@
+---
+title: "Growth Curves analysis for a 384 Well Plate temperature assay"
+author: "Alberto Barron"
+date: "2024-01-14"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache = F)
+knitr::opts_knit$set(root.dir = here::here())
+options(scipen=10000, digits = 12)
+set.seed(seed = 711)
+```
+
+```{r loading data, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
+# Load necessary libraries
+library(readr)
+library(tidyverse)
+apatheme=theme_bw()+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        text=element_text(family='Futura Medium'))
+
+
+
+# Read the file as lines
+lines <- readLines(here::here("data-raw/temp/Clade1_temp_aasay.txt"))
+plate_map <- read.table(here::here("data/temp/plate_map_011424.txt"), header = T, sep = "\t")
+
+date <- "2024-01-14"
+
+# Step 2: Filter out unwanted lines
+clean_lines <- lines[!grepl("^600", lines) & !grepl("^Plate ID", lines) & lines != ""]
+
+# Convert the clean lines back into a single character string
+clean_text <- paste(clean_lines, collapse = "\n")
+
+# Step 3: Convert the cleaned text into a data frame
+# Assuming the data is tab-separated; adjust sep="\t" if it uses a different delimiter
+data_table <- read_tsv(clean_text, col_names = FALSE)
+
+# Manually name the columns
+colnames(data_table) <- c("Plate_ID", "Well_ID", "Well", "Value")
+
+# View the resulting data frame
+print(data_table)
+
+# Assuming 'combined_table' is your data frame
+data_table <- data_table %>%
+  mutate(
+    # Extract the temperature (Temp) value
+    Temp = as.numeric(str_extract(Plate_ID, "(?<=T)\\d+")),
+    # Extract the time (Time) value
+    Time_h = as.numeric(str_extract(Plate_ID, "\\d+(?=h)"))
+  )
+
+na_positions <- which(is.na(data_table), arr.ind = TRUE)
+data_table[is.na(data_table)] <- 40
+data_table$Temp<-as.factor(data_table$Temp)
+# View the updated data frame to confirm the new variables
+head(data_table)
+str(data_table)
+unique(data_table$Time_h)
+unique(data_table$Temp)
+
+# Replace value 38 with 37 in the Value column
+#data_table$Temp[data_table$Temp == 38] <- 28
+```
+
+
+```{r pre-processing and mapping isolate info, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
+# Assuming 'data_table' is your main data frame (Table A) and 'table_b' is loaded with Well and StrainID
+
+# First, generate the correct mapping sequences for both odd and even wells.
+odd_sequence <- c(seq(1, 21, 2))
+even_sequence <- c(seq(2, 22, 2))
+
+# Create the base vectors for the well IDs for each set of conditions
+wells_A_to_C_odd <- unlist(lapply(c('A', 'B', 'C'), function(letter) paste0(letter, odd_sequence)))
+wells_A_to_C_even <- unlist(lapply(c('A', 'B', 'C'), function(letter) paste0(letter, even_sequence)))
+wells_D_to_F_odd <- unlist(lapply(c('D', 'E', 'F'), function(letter) paste0(letter, odd_sequence)))
+wells_D_to_F_even <- unlist(lapply(c('D', 'E', 'F'), function(letter) paste0(letter, even_sequence)))
+wells_G_to_I_odd <- unlist(lapply(c('G', 'H', 'I'), function(letter) paste0(letter, odd_sequence)))
+wells_G_to_I_even <- unlist(lapply(c('G', 'H', 'I'), function(letter) paste0(letter, even_sequence)))
+wells_J_to_L_odd <- unlist(lapply(c('J', 'K', 'L'), function(letter) paste0(letter, odd_sequence)))
+wells_J_to_L_even <- unlist(lapply(c('J', 'K', 'L'), function(letter) paste0(letter, even_sequence)))
+# ... Continue for the rest of the alphabet blocks as needed
+
+# Now create a list to hold the mappings for each block, starting with A1-A11 (odd) from Table B
+mapping <- list()
+mapping[['A_to_C_odd']] <- data.frame(Well = wells_A_to_C_odd, StrainID = plate_map$StrainID[1:11])
+mapping[['A_to_C_even']] <- data.frame(Well = wells_A_to_C_even, StrainID = plate_map$StrainID[12:22])
+mapping[['D_to_F_odd']] <- data.frame(Well = wells_D_to_F_odd, StrainID = plate_map$StrainID[23:33])
+mapping[['D_to_F_even']] <- data.frame(Well = wells_D_to_F_even, StrainID = plate_map$StrainID[34:44])
+mapping[['G_to_I_odd']] <- data.frame(Well = wells_G_to_I_odd, StrainID = plate_map$StrainID[45:55]) # Adjust index as needed
+mapping[['G_to_I_even']] <- data.frame(Well = wells_G_to_I_even, StrainID = plate_map$StrainID[56:66]) # Adjust index as needed
+mapping[['J_to_L_odd']] <- data.frame(Well = wells_J_to_L_odd, StrainID = plate_map$StrainID[67:77]) # Adjust index as needed
+mapping[['J_to_L_even']] <- data.frame(Well = wells_J_to_L_even, StrainID = plate_map$StrainID[78:88]) # Adjust index as needed
+# ... Continue for the rest of the alphabet blocks as needed
+
+# Combine all mappings into a single data frame
+mapping_df <- do.call(rbind, mapping)
+
+# in case of replicates inside the same plate run the following lines (uncomented)
+# Find unique names and their count
+SVEC<-as.factor(mapping_df$StrainID)
+replicates <- ave(seq_along(SVEC), SVEC, FUN = function(x) cumsum(!duplicated(x)))
+
+
+#add replicate info to the mapping df
+mapping_df$replicate <- replicates
+
+
+# Merge the mapping with the original data_table
+# Ensure that Well is a character both in data_table and mapping for a successful merge
+data_table$Well <- as.character(data_table$Well)
+mapping_df$Well <- as.character(mapping_df$Well)
+
+data_table <- left_join(data_table, mapping_df, by = "Well")
+
+# Check the first few rows of the merged table
+head(data_table)
+
+test_data <- filter(data_table, Plate_ID == "T33_20h")
+
+duplicate_rows <- data_table %>%
+  group_by(Time_h, Well, Temp) %>%
+  filter(n() > 1) %>%
+  ungroup() %>%
+  select(Time_h, Temp) %>%
+  distinct()
+  
+```
+
+```{r ploting negatives and clear correction, message=FALSE, warning=FALSE, results='hold', echo=FALSE, fig.width=18, fig.height=14}
+## now we need to get an average of the negatives to substract the clear from the readings
+# Plotting the negatives
+data_table %>% filter(Time_h != 12 & 
+                        StrainID == "NEG") %>% 
+  ggplot(aes(x = Time_h, y = Value, group = Temp, color = Temp)) + # Define axes and group by Well
+  geom_line() + # Use line plot to connect points over time
+  geom_point() + # Add points to visualize individual measurements
+  #geom_errorbar(aes(ymin = Average - SD, ymax = Average + SD), width = 0.2) + # Add error bars
+  facet_wrap(~Well) + # Create facets for each Temp value, separate by Well
+  theme_bw() + # Use a basic theme for better readability
+  labs(x = "Time (h)", y = "OD at 600nm", title = "Negatives") +
+  theme(strip.text.x = element_text(size = 4), strip.text.y = element_text(size = 4)) # Adjust facet label siz
+
+
+neg_controls <- data_table %>% filter(StrainID == "NEG" & Time_h == 13) %>% 
+  group_by(Temp) %>% summarise(avg.neg = mean(Value, na.rm = T))
+
+data_table <- data_table %>% 
+  filter(Time_h != 12 & StrainID != "NEG") %>%
+  left_join(neg_controls, by = "Temp") %>%
+  # Subtract the avg.neg from Value and create a new column for the result
+  mutate(Adjusted_Value = Value - avg.neg) %>%
+  # Optionally, remove the avg.neg column if it's no longer needed
+  select(-avg.neg, - Value) %>%
+  rename(Value = Adjusted_Value)
+
+
+# Group by StrainID, Time, and Temp, then summarize
+summary_table <- data_table %>%
+  group_by(StrainID, Time_h, Temp) %>%
+  summarise(
+    Average = mean(Value, na.rm = TRUE),  # Calculate average, excluding NA values
+    SD = sd(Value, na.rm = TRUE)          # Calculate standard deviation, excluding NA values
+  ) %>%
+  ungroup()  # Remove the grouping specification
+
+# View the summary table
+print(summary_table)
+
+
+# Plotting
+
+for (i in 1:length(unique(summary_table$Temp))) {
+
+  plot <- summary_table %>%
+    filter(Temp == unique(summary_table$Temp)[i] & Time_h != 12) %>% 
+  ggplot(aes(x = Time_h, y = Average, group = Temp, color = Temp)) + # Define axes and group by Well
+  geom_line() + # Use line plot to connect points over time
+  geom_point() + # Add points to visualize individual measurements
+  scale_color_manual(values = colorRampPalette(c("cyan", "red"))(length(unique(summary_table$Temp)))[i],
+                     name = "Temperature",
+                     labels = as.factor(summary_table$Temp)[i]) +
+  geom_errorbar(aes(ymin = Average - SD, ymax = Average + SD), width = 0.2) + # Add error bars
+  facet_wrap(~StrainID) + # Create facets for each Temp value, separate by Well
+  theme_bw() + # Use a basic theme for better readability
+  labs(x = "Time (h)", y = "Measurement at 600nm", title = paste("Measurement by Strain, and Temp", unique(summary_table$Temp)[i])) +
+  theme(strip.text.x = element_text(size = 4), strip.text.y = element_text(size = 4)) # Adjust facet label size
+  print(plot)
+}
+
+
+
+#summary_table %>% filter(Time_h != 12) %>% 
+#  ggplot(aes(x = Time_h, y = Average, group = Temp, color = Temp)) + # Define axes and group by Well
+#  geom_line() + # Use line plot to connect points over time
+#  geom_point() + # Add points to visualize individual measurements
+#  scale_color_manual(values = colorRampPalette(c("cyan", "red"))(length(unique(summary_table$Temp))),
+#                     name = "Temperature",
+#                     labels = as.factor(summary_table$Temp)) +
+#  geom_errorbar(aes(ymin = Average - SD, ymax = Average + SD), width = 0.2) + # Add error bars
+#  facet_wrap(~StrainID) + # Create facets for each Temp value, separate by Well
+#  theme_bw() + # Use a basic theme for better readability
+#  labs(x = "Time (h)", y = "Measurement at 600nm", title = "Measurement by Strain, and Temp") +
+#  theme(strip.text.x = element_text(size = 4), strip.text.y = element_text(size = 4)) # Adjust facet label size
+
+#ggsave("/Users/apple/SyncFolder/CA_curto/phys_assays/temp/temp_assay.png",
+#       width = 45,
+#       height = 40,
+#       units = "cm",
+#       dpi = 600)
+```
+
+```{r analyzing growth curves, fig.width=18, fig.height=14, echo=FALSE,  message=FALSE, warning=FALSE, results='hold'}
+## now lets recast the table into long format to run GrowthCurver and calculate growth rate and other parameters
+
+## Assuming 'data_table' exists and you intended to use wide format as per 'dcast' usage
+#for (temp in sort(unique(data_table$Temp))) {
+#  # Subset data for the current temperature
+#  temp_data <- filter(data_table, Temp == temp)
+#  
+#  # If you actually meant to go to wide format (Time ~ Well with values from 'Value')
+#  temp_wide_data <- reshape2::dcast(temp_data[,-c(1,2,4,6)], Time_h ~ Well, value.var = "Value")
+#  
+#  # Apply SummarizeGrowth to each Well column in wide_data
+#  models.all<-lapply(temp_wide_data[2:ncol(temp_wide_data)], summG)
+#}
+ # Subset data for the current temperature
+library(growthcurver)
+library(reshape2)
+
+summG <- function(x) {SummarizeGrowth(temp_wide_data$Time, x, t_trim = 0, bg_correct = "none")}
+
+strain.labs<-data.frame(label= unique(data_table$StrainID),  # Create data for text
+                        x = rep(10, length(unique(data_table$StrainID))),
+                        y = rep(0.5, length(unique(data_table$StrainID))))
+
+all_plate_summaries_rev <- list()
+
+temp_data <- filter(data_table, Temp == 33)
+
+# Check for duplicate Time_h and Well combinations
+duplicates <- temp_data %>%
+  group_by(Time_h, Well) %>%
+  summarize(count = n(), .groups = 'drop') %>%
+  filter(count > 1)
+
+duplicate_rows <- temp_data %>%
+  group_by(Time_h, Well) %>%
+  filter(n() > 1) %>%
+  ungroup() 
+
+if (nrow(duplicates) > 0) {
+  print("Duplicates found")
+  print(duplicates)
+} else {
+  print("No duplicates found")
+}
+
+
+
+for (temp in sort(unique(data_table$Temp))) {
+  
+  temp_data <- filter(data_table, Temp == temp)
+  
+  # If you actually meant to go to wide format (Time ~ Well with values from 'Value')
+  temp_wide_data <- reshape2::dcast(temp_data[,-c(1,2,4,6)], Time_h ~ Well, value.var = "Value", fun.aggregate = mean)
+  colnames(temp_wide_data)[1] <- "Time"
+  
+  # Apply SummarizeGrowth to each Well column in wide_data
+  models.all<-lapply(temp_wide_data[2:ncol(temp_wide_data)], summG)
+
+
+  n<-length(names(models.all))
+  # Let's check which curves had a poor fit or could not be fitted
+  plate_summary<-data.frame(sample = character(n),
+                            k = numeric(n),
+                            n0  = numeric(n),
+                            r = numeric(n),
+                            t_mid = numeric(n),
+                            t_gen = numeric(n),
+                            auc_l = numeric(n),
+                            auc_e = numeric(n),
+                            sigma = numeric(n),
+                            note = character(n),
+                            stringsAsFactors = FALSE)
+  
+  n<-1
+  for (col_name in names(models.all)) {
+    
+        plate_summary$sample[n] <- col_name
+        plate_summary$k[n] <-models.all[[col_name]]$vals$k
+        plate_summary$n0[n]  <-models.all[[col_name]]$vals$n0
+        plate_summary$r[n] <-models.all[[col_name]]$vals$r
+        plate_summary$t_mid[n] <-models.all[[col_name]]$vals$t_mid
+        plate_summary$t_gen[n] <-models.all[[col_name]]$vals$t_gen
+        plate_summary$auc_l[n] <-models.all[[col_name]]$vals$auc_l
+        plate_summary$auc_e[n] <-models.all[[col_name]]$vals$auc_e
+        plate_summary$sigma[n] <-models.all[[col_name]]$vals$sigma
+        plate_summary$note[n]  <-models.all[[col_name]]$vals$note
+  
+        n<-n+1
+  }
+
+  plate_summary<-merge(plate_summary, mapping_df, by.x = "sample", by.y = "Well", all.x = T)
+  plate_summary$Temp <- rep(temp, length(nrow(plate_summary)))
+  plate_summary %>% filter(note != "") %>% select(sample, note, StrainID, Temp)
+  #Let's get a list of the well ID of those that could not be fitted
+  not_fit<-c(plate_summary %>% filter(note == "cannot fit data") %>% select(sample))$sample
+  
+  df.predicted.plate <- data.frame(Time = temp_wide_data$Time)
+  for (i in names(temp_wide_data[2:ncol(temp_wide_data)])[!names(temp_wide_data[2:ncol(temp_wide_data)]) %in% not_fit]){
+    df.predicted.plate[[i]] <- predict(models.all[[i]]$model)
+    }
+  
+  for (i in not_fit){
+    df.predicted.plate[[i]] <- rep(0.085, nrow(df.predicted.plate))
+  }
+  
+  melt1 <- melt(temp_wide_data, id.vars = "Time", variable.name = "Well", value.name = "OD")
+  melt2 <- melt(df.predicted.plate, id.vars = "Time", variable.name = "Well", value.name = "pred.OD")
+  #melt1<- melt1 %>% filter(Time < 30)
+  df.final <- merge(melt1, melt2, by = c("Time", "Well"))
+  
+  max.OD.df <- as.data.frame(apply(temp_wide_data[,-1], 2, max))
+  max.OD.df$sample <- row.names(max.OD.df)
+  colnames(max.OD.df)[1] <- "max.OD"
+  
+  plate_summary <- merge(plate_summary, max.OD.df, by = "sample")
+  
+  plate_summary.rev <- plate_summary %>%
+  #  mutate(note = case_when(k < 0.1 ~ "questionable fit (k < 0.1)",
+  #                          k > 1 ~ "questionable fit (k > 1)",
+  #                          TRUE ~ note)) %>%
+    mutate(r = case_when(k < 0.086 ~ 0,
+                            k > 1 ~ r,
+                            TRUE ~ r)) %>%
+    mutate(k = case_when(k < 0.086 ~ 0,
+                            k > 1 ~ max.OD,
+                            TRUE ~ k))
+  
+  df.final<- df.final %>%
+    merge(., mapping_df, by = "Well", all.x = T) %>%
+    merge(., plate_summary.rev[,c(1,2,4,9,10)], by.x = "Well", by.y = "sample")
+  
+  # Store the plate_summary for each temperature
+  all_plate_summaries_rev[[as.character(temp)]] <- plate_summary.rev
+  
+  summary_table_obs <- df.final %>%
+    group_by(StrainID, Time) %>%
+    summarise(
+      Avg.OD = mean(OD, na.rm = TRUE),  # Calculate average, excluding NA values
+      OD.SD = sd(OD, na.rm = TRUE),          # Calculate standard deviation, excluding NA values
+      Avg.pred.OD = mean(pred.OD, na.rm = TRUE),  # Calculate average of predicted OD, excluding NA values
+      pred.OD.SD = sd(pred.OD, na.rm = TRUE)  # Calculate SD of predicted OD, excluding NA values
+      ) %>%
+    ungroup()
+  
+  
+  
+  tmp<- df.final %>%
+    select(StrainID, r, k, sigma) %>%
+    group_by(StrainID) %>% 
+    summarise(
+      avg.r = mean(r, na.rm = T),
+      avg.k = mean(k, na.rm = T),
+      avg.sigma = mean(sigma, na.rm = T),
+      sd.r = sd(r, na.rm = T),
+      sd.k = sd(k, na.rm = T),
+      sd.sigma = sd(sigma, na.rm = T)
+    ) %>% 
+    merge(., strain.labs, by.x = "StrainID", by.y = "label")
+    
+  plot<- summary_table_obs %>%
+    #filter(strain.rep == unique(df.final$strain.rep)[i]) %>% 
+    ggplot(aes(x = Time, y = Avg.OD)) +
+      geom_point(alpha=0.3) +
+      geom_line(aes(y=Avg.pred.OD), color="red") +
+      geom_errorbar(aes(ymin = Avg.pred.OD - pred.OD.SD, ymax = Avg.pred.OD + pred.OD.SD), width = 0.2, color = "red") + # Add error bars
+      ylim(0, 0.6) +
+      xlab("Time (hrs)") +
+      #geom_text(tmp, mapping = aes(x = x, y = y, label =  paste("pH",label)), family = "mono") +
+      #geom_text(tmp, mapping = aes(x = x+10, y = y-0.05, label = note), family = "mono") +
+      #geom_text(tmp, mapping = aes(x = x, y = y+0.05, label = well), family = "mono") +
+      geom_text(tmp, mapping = aes(x = x, y = y, label = paste("avg.r:",round(avg.r, digits = 3))), family = "mono") +
+      geom_text(tmp, mapping = aes(x = x+10, y = y-0.15, label = paste("avg.K:",round(avg.k, digits = 3))), family = "mono") +
+      geom_text(tmp, mapping = aes(x = x+10, y = y-0.20, label = paste("avg.sigma:",round(avg.sigma, digits = 3))), family = "mono") +
+      facet_wrap(~StrainID) +
+      labs(title = paste("Temperature assay T:",temp,"˚C"),
+           subtitle = date) +
+      apatheme +
+      theme(strip.background = element_blank(),
+            #strip.text.x = element_blank(),
+            plot.title = element_text(color = "black", size = 12),
+            plot.subtitle = element_text(color = "black", size = 10))
+    
+    print(plot)
+    rm(tmp)
+}
+
+#ggsave("/Users/apple/SyncFolder/CA_curto/phys_assays/temp/temp_assay_28_res.png",
+#       width = 45,
+#       height = 40,
+#       units = "cm",
+#       dpi = 600)
+
+
+
+```
+
+## Temperature performance curve (reaction norm)
+
+```{r analyze growth cureve parametters, echo=FALSE, fig.width=18, fig.height=14,  message=FALSE, warning=FALSE, results='hold'}
+## lets create a data table with all growth values
+growth.values <-do.call(rbind, all_plate_summaries_rev)
+## lets add the date to the table to later export it
+growth.values$date<-rep(date, length(row.names(growth.values)))
+
+## Let's get the metadata info for each strain. For that we need to read in the master metadata table.
+master_md <- read.table(here::here("data/shared/master_md_all_sequenced_Isolates_with_extendedMD.txt"), header = T, sep = "\t")
+# selec only columns of interest
+master_md <- master_md %>% select(Name, clade, subclade)
+
+#merge with growth values data table and select only columns of interes to make sure names match
+clade_info <- merge(growth.values, master_md, by.x = "StrainID", by.y = "Name", all.x = T) %>% select(StrainID, clade, subclade) %>% distinct()
+
+#now let's match the clade colors to the metadata
+clade_colors <- read.table(here::here("data/shared/clade_colors.txt"), header = T, sep = "\t", comment.char = "")
+clade_info$clade_color <- clade_colors$color[match(clade_info$clade, clade_colors$variable)]
+clade_info$subclade_color <- clade_colors$color[match(clade_info$subclade, clade_colors$variable)]
+
+# now merge with growth values table
+#growth.values <-merge(growth.values, clade_info, by = "StrainID", all.x = T)
+
+#get averages for r and k with SD
+growth.values.summary <- growth.values %>%
+    group_by(StrainID, Temp) %>%
+    summarise(
+      Avg.r = mean(r, na.rm = TRUE),  # Calculate average, excluding NA values
+      r.SD = sd(r, na.rm = TRUE),          # Calculate standard deviation, excluding NA values
+      Avg.k = mean(k, na.rm = TRUE),  # Calculate average of predicted OD, excluding NA values
+      k.SD = sd(k, na.rm = TRUE)  # Calculate SD of predicted OD, excluding NA values
+      ) %>%
+    ungroup() %>%
+  merge(., clade_info, by = "StrainID", all.x = T)
+
+#growth.values.summary$Temp <- factor(growth.values.summary$Temp, levels = c("9", "20", "26", "28", "30", "33", "37"))
+growth.values.summary$Temp <- as.numeric(growth.values.summary$Temp)
+  
+  
+## create strings to color by:
+## clade:
+clade_col <- as.character(growth.values.summary$clade_color)
+names(clade_col) <- as.character(growth.values.summary$clade)
+
+## subclade:
+subclade_col <- as.character(growth.values.summary$subclade_color)
+names(subclade_col) <- as.character(growth.values.summary$subclade)
+
+## performance curve for R
+for (subclades in unique(growth.values.summary$subclade)) {
+  
+  if (is.na(subclades)) {
+    
+    temp_curve<-ggplot(growth.values.summary %>% filter(is.na(subclade))
+                 ,
+                 aes(x = Temp,
+                    color = subclade,
+                    group = subclade,
+                    y = Avg.r)) +
+  scale_color_manual(values = subclade_col, name = "Subclade") +
+  #geom_line() +
+  geom_errorbar(aes(ymin = Avg.r - r.SD, ymax = Avg.r + r.SD), width = 0.2) + # Add error bars
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col, name = "Subclade") +
+  geom_point(size = 2) +
+  #scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  facet_wrap(~StrainID) +
+  ylim(0, 0.5) +
+  labs(title = paste("Temperature performance curve (r), Subclade:", subclades),
+       subtitle = date) +
+  ylab("Avg. growth rate (r)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        #strip.background = element_blank(),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "none")
+
+print(temp_curve)
+    
+  } else {
+  
+
+temp_curve<-ggplot(growth.values.summary %>% filter(subclade == subclades)
+                 ,
+                 aes(x = Temp,
+                    color = subclade,
+                    group = subclade,
+                    y = Avg.r)) +
+  scale_color_manual(values = subclade_col, name = "Subclade") +
+  #geom_line() +
+  geom_errorbar(aes(ymin = Avg.r - r.SD, ymax = Avg.r + r.SD), width = 0.2) + # Add error bars
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col, name = "Subclade") +
+  geom_point(size = 2) +
+  #scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  facet_wrap(~StrainID) +
+  ylim(0, 0.5) +
+  labs(title = paste("Temperature performance curve (r), Subclade:", subclades),
+       subtitle = date) +
+  ylab("Avg. growth rate (r)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        #strip.background = element_blank(),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "none")
+
+print(temp_curve)
+  }
+}
+
+## performane curve for K
+for (subclades in unique(growth.values.summary$subclade)) {
+  
+  
+  if (is.na(subclades)) {
+    
+    temp_curve_k<-ggplot(growth.values.summary %>% filter(is.na(subclade))
+                 ,
+                 aes(x = Temp,
+                    color = subclade,
+                    group = subclade,
+                    y = Avg.k)) +
+  scale_color_manual(values = subclade_col, name = "Subclade") +
+  #geom_line() +
+  geom_errorbar(aes(ymin = Avg.k - k.SD, ymax = Avg.k + k.SD), width = 0.2) + # Add error bars
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col, name = "Subclade") +
+  geom_point(size = 2) +
+  #scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  facet_wrap(~StrainID) +
+  ylim(0, 0.5) +
+  labs(title = paste("Temperature performance curve (K), Subclade:", subclades),
+       subtitle = date) +
+  ylab("Avg. carrying capacity (K)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        #strip.background = element_blank(),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "none")
+
+print(temp_curve_k)
+    
+  } else {
+
+temp_curve_k<-ggplot(growth.values.summary %>% filter(subclade == subclades)
+                 ,
+                 aes(x = Temp,
+                     color = subclade,
+                    group = subclade,
+                    y = Avg.k)) +
+  scale_color_manual(values = subclade_col, name = "Subclade") +
+  #geom_line() +
+  geom_errorbar(aes(ymin = Avg.k - k.SD, ymax = Avg.k + k.SD), width = 0.2) + # Add error bars
+ geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col, name = "Subclade") +
+  geom_point(size = 2) +
+  #scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  facet_wrap(~StrainID) +
+  ylim(0, 1) +
+  labs(title = paste("Temperature performance curve (K), Subclade:", subclades),
+       subtitle = date) +
+  ylab("Avg. carrying capacity (K)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        #strip.background = element_blank(),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "none")
+
+print(temp_curve_k)
+
+  }
+}  
+
+```
+
+##### Exporting the processed data
+
+Finally, let's. export the processed data, the table with the estimated growth curve parameters so we can consolidate it all into a large data file that we will use to store all the replicates for each strain that we use for the pH assays.
+
+```{r exporting processed data}
+write.table(growth.values #%>% filter(!strain %in% c("23G1B10", "23G4B11"))
+            , file = paste(here::here("data/temp/GC_values_Temp_assay"),date,"txt", sep = "."), sep = "\t", row.names = FALSE, quote = FALSE)
+```

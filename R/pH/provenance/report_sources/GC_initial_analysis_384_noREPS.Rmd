@@ -1,0 +1,498 @@
+---
+title: "Growth Curves analysis for a 384 Well Plate pH assay NO REPLICATES"
+author: "Alberto Barron"
+date: "`r date`"
+output: html_document
+params:
+  date: !r date
+  strains: !r SVEC
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache = F)
+knitr::opts_knit$set(root.dir = here::here())
+options(scipen=10000, digits = 12)
+set.seed(seed = 711)
+```
+
+
+## Strains
+
+`r paste0("- ",SVEC, collapse = "\n")`
+
+### Description
+
+This script is meant to analyse the growth data for a single pH assay on a 384 well plate. Each plate has 24 pH levels in which we grow fifteen (15) different isolates plus the blanks. In order to do this this script:
+
+1 - Takes the output raw data from the plate reader and do background correction, plot the data after background correction, plot the blanks to be sure that everything looks okay.
+
+2 - It uses the package 'growthcurver' to create a model for the growth curve of each strain on each pH level and plots the predicted values from the model along with the observed values from the plate reader.
+
+3 - Get the growth curve parameters for every combination of pH and strain and plots the estimated growth rate (r) against the pH level to obtain a pH response curve and exports the growth curve parameters to text file to consolidate all data for further analysis.
+
+
+
+###### General settings
+
+In this chunk of code we load the required packages, set the general aesthetics for the plots and set the working directory.
+
+```{r general settings, message=FALSE, warning=FALSE, results='hold'}
+
+library(growthcurver)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(purrr)
+
+apatheme=theme_bw()+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        text=element_text(family='Futura Medium'))
+
+taxa_colors <- c(
+  "#CBD588", "#5F7FC7", "orange","#DA5724", "#508578", "#CD9BCD", 
+  "#AD6F3B", "#673770","#D14285", "#652926", "#C84248", 
+  "#8569D5", "#5E738F","#D1A33D", "#8A7C64", "#599861", "red",
+  "blue", "#483D8B", "gray", "darkcyan", "darkgoldenrod4", "green", "#8B0000",
+  "darkgreen", "yellow", "lightblue", "forestgreen", "darkorange4", "purple", "salmon", "steelblue", "pink")
+
+#set working directory
+#setwd(here::here())
+getwd()
+```
+
+#### Loading the data
+
+First, we have to load the raw data that the plate reader gives us. To do this let's set the file name, date and isolate IDs.
+
+**ATTENTION: This is the only part of the script that should be modified to change the input file name, strain names and date**
+
+```{r set up file name strains and date}
+# Set the name of the output file from the plate reader
+
+#raw_plate_reads_file<-data
+
+#dat<-paste("./data/",raw_plate_reads_file, sep = "")
+
+# Set the names of the strains in this plate
+#S1<-"25G2A02" # Strain in Row Row A
+#S2<-"25G2A02" # Strain in Row B
+#S3<-"25G2A02" # Strain in Row C
+#S4<-"35G2B04" # Strain in Row D
+#S5<-"35G2B04" # Strain in Row E
+#S6<-"35G2B04" # Strain in Row F 
+#S7<-"35G3B04" # Strain in Row G
+#S8<-"35G3B04" # Strain in Row H
+#S9<-"35G3B04" # Strain in Row I
+#S10<-"25D05" # Strain in Row J
+#S11<-"25D05" # Strain in Row K
+#S12<-"25D05" # Strain in Row L
+#S13<-"26G4B12" # Strain in Row M
+#S14<-"26G4B12" # Strain in Row N
+#S15<-"26G4B12" # Strain in Row O
+
+# Set Value with the date of the pH assay on format yyyy-mm-dd
+date#<-"2023-04-14"
+```
+
+Now the data is ready to be loaded into R
+
+```{r load data}
+# Read in the Data
+#data <- read.csv(file=dat, header = TRUE, stringsAsFactors = F)
+# Remove the temperature column
+data <- data[,-2]
+
+# Change time from HH:MM:SS to hours and fractions in decimals
+data$Time<-period_to_seconds(hms(data$Time))/3600
+```
+
+#### Make a map of the plate
+
+In this step we create a plate map that matches the strain ID and pH to their corresponding well.
+
+```{r}
+## Create a map of the plate layout that matches strain name, pH and well
+# A list of the pH levels in each row
+phlist<-c(rep(seq(3.2, 10.2 , 0.3), 16)) # pH levels for Each row
+
+#SVEC<-c(S1,S2,S3,S4,S5,S6,S7,S8,S9,S10,S11,S12,S13,S14,S15)
+
+# A list of the strains in each row
+strainlist<-c()
+
+for (i in 1:length(SVEC)) {
+  tmpvec<-rep(SVEC[i],24)
+  strainlist<-c(strainlist, tmpvec)
+  rm(tmpvec)
+}
+# Add the negative wells
+strainlist<-c(strainlist, rep("NEG", 24))
+
+# in case of replicates inside the same plate run the following lines (uncomented)
+#replicate<-as.factor(c(rep(c(
+#  rep(1, 24),
+#  rep(2, 24),
+#  rep(3, 24)), 5),
+#  rep(NA, 24)))
+
+
+# Put together both vectors (lists) into a data frame
+platemap<-cbind.data.frame(strainlist, phlist)
+#platemap<-cbind.data.frame(strainlist, phlist, replicate)
+rm(phlist, strainlist)
+
+# Get the names of the names columns from the data frame (A1, A2,..., H12) to a single column named "well" in our plate map data frame
+platemap$well<-colnames(data[,-1])
+```
+
+### Plotting the raw data
+
+In this step we will take a first look to the data and do the background correction and plot the data to see if everything looks as expected.
+
+```{r preliminary results, fig.width=12, fig.height=8}
+# Reshape the table with many columns, one for each well to one whith just time, well name, and OD
+mdata<-reshape2::melt(data, id = "Time", variable.name = "well")
+
+# Now let's map the strain name and pH level to the long data frame 
+mdata<-merge(mdata, platemap, by = "well", all.y = T)
+colnames(mdata)[4]<-"strain"
+colnames(mdata)[5]<-"pH"
+
+
+# let's subset the blank wells so we can substract them from the OD measurments
+mdata_neg<-mdata %>% dplyr::filter(strain == "NEG")
+
+
+
+
+## Method 1: match blank readings by time and pH and then subtract the blanks from the OD values
+for (i in 1:length(SVEC)) {
+
+  if (!exists("mdata_temp")){
+    mdata_temp <- data.frame()
+  }
+    
+  if (exists("mdata_temp")) {
+    
+    temp_dataset <- mdata %>%
+      filter(strain == SVEC[i]) %>%
+      merge(., mdata_neg[,-c(1,4,6)], by = c("Time", "pH")) %>%
+      mutate(OD = value.x - value.y) %>%
+      select(-c(value.y, value.x)) %>%
+      arrange(well, Time)
+
+    mdata_temp<-unique(rbind(mdata_temp, temp_dataset))
+    rm(temp_dataset)
+    }
+}
+
+### Method 2: average blank values and subtract from the OD values
+#for (i in 1:length(SVEC)) {
+#  # inner loop to filter by pH and subtract the mean negative OD values
+#  for (j in 1:length(unique(platemap$phlist))) {
+#    for (k in c(1:3)) {
+#      
+#   
+#    
+#  # if the merged dataset doesn't exist, create it
+#  if (!exists("mdata_temp")){
+#    mdata_temp <- data.frame()
+#  }
+#    
+#  if (exists("mdata_temp")) {
+#    
+#    temp_dataset <- mdata %>%
+#      filter(strain == SVEC[i] & pH == unique(platemap$phlist)[j] & replicate == k) %>%
+#        mutate(OD = value - dnegm$negemeanOD) %>%
+#        select(-value) %>%
+#        arrange(well, Time)
+#
+#    mdata_temp<-unique(rbind(mdata_temp, temp_dataset))
+#    rm(temp_dataset)
+#  }
+#    }
+#  }
+#}
+
+## set al negative values to zero "0"
+mdata_temp$OD[mdata_temp$OD < 0] <- 0
+mdata <- mdata_temp
+rm(mdata_temp)
+
+
+## now we have our data ready to plot the preliminary growth curves
+
+phlabs<-data.frame(label= sort(unique(mdata$pH)),  # Create data for text
+                        pH = sort(unique(mdata$pH)),
+                        x = rep(10, 24),
+                        y = rep(0.5, 24))
+for (i in 1:(length(SVEC))){
+plot<-mdata %>%
+  filter(strain == SVEC[i]) %>% 
+  ggplot(aes(x = Time, y = OD)) +
+    geom_text(phlabs, mapping = aes(x = x, y = y, label = paste("pH",label)), family = "mono") +
+    geom_point(alpha=0.3, size = .7) +
+    ylim(0, 0.6) +
+    xlab("Time (hrs)") +
+    facet_wrap(~pH, ncol = 6) +
+    labs(title = paste("pH assay for isolate", SVEC[i]),
+         subtitle = date) +
+    apatheme +
+    theme(strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          plot.title = element_text(color = "black", size = 12),
+          plot.subtitle = element_text(color = "black", size = 10))
+  
+  print(plot)
+  }
+
+## let's plot the negatives just to be sure that there's no growth in those
+
+ggplot(mdata_neg, aes(x = Time, y = value)) +
+    geom_point(alpha=0.7) +
+    ylim(0, 0.6) +
+    xlab("Time (hrs)") +
+    geom_text(phlabs, mapping = aes(x = x, y = y-0.35, label =  paste("pH",label)), family = "mono") +
+    facet_wrap(~pH, ncol = 6) +
+    labs(title = "pH assay NEG",
+            subtitle = date) +
+    apatheme +
+    theme(strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          plot.title = element_text(color = "black", size = 12),
+          plot.subtitle = element_text(color = "black", size = 10))
+
+
+```
+
+### Analyze the growth curves
+
+In this step we will use the 'growthcurver' package to calculate growth curve parameters and plot the adjusted model to the plots.
+
+```{r ploting predicted values, fig.width=12, fig.height = 8}
+## We have removed the blank values from our data frame, next we can transform it again to it's original form to run 'growthcurver' on that data set
+dmdata<-reshape2::dcast(mdata[,-c(2,4,5)], Time ~ well, value.var = "OD")
+
+## Create a function to run growthcurver::SummarizeGrowth on all columns of the data
+summG <- function(x) {SummarizeGrowth(dmdata$Time, x, t_trim = 0, bg_correct = "none")}
+## Apply that function over the columns of the data
+models.all<-lapply(dmdata[2:ncol(dmdata)], summG)
+
+n<-length(names(models.all))
+# Let's check which curves had a poor fit or could not be fitted
+plate_summary<-data.frame(sample = character(n),
+                          k = numeric(n),
+                          n0  = numeric(n),
+                          r = numeric(n),
+                          t_mid = numeric(n),
+                          t_gen = numeric(n),
+                          auc_l = numeric(n),
+                          auc_e = numeric(n),
+                          sigma = numeric(n),
+                          note = character(n),
+                          stringsAsFactors = FALSE)
+
+n<-1
+for (col_name in names(models.all)) {
+  
+      plate_summary$sample[n] <- col_name
+      plate_summary$k[n] <-models.all[[col_name]]$vals$k
+      plate_summary$n0[n]  <-models.all[[col_name]]$vals$n0
+      plate_summary$r[n] <-models.all[[col_name]]$vals$r
+      plate_summary$t_mid[n] <-models.all[[col_name]]$vals$t_mid
+      plate_summary$t_gen[n] <-models.all[[col_name]]$vals$t_gen
+      plate_summary$auc_l[n] <-models.all[[col_name]]$vals$auc_l
+      plate_summary$auc_e[n] <-models.all[[col_name]]$vals$auc_e
+      plate_summary$sigma[n] <-models.all[[col_name]]$vals$sigma
+      plate_summary$note[n]  <-models.all[[col_name]]$vals$note
+
+      n<-n+1
+}
+
+plate_summary<-merge(plate_summary, platemap, by.x = "sample", by.y = "well", all.y = T)
+plate_summary<-plate_summary %>% filter(strainlist != "NEG")
+plate_summary %>% filter(note != "") %>% select(sample, note, strainlist, phlist)
+
+
+#Let's get a list of the well ID of those that could not be fitted
+not_fit<-c(plate_summary %>% filter(note == "cannot fit data") %>% select(sample))$sample
+
+df.predicted.plate <- data.frame(Time = dmdata$Time)
+for (i in names(dmdata[2:ncol(dmdata)])[!names(dmdata[2:ncol(dmdata)]) %in% not_fit]){
+  df.predicted.plate[[i]] <- predict(models.all[[i]]$model)
+  }
+
+
+for (i in not_fit){
+  df.predicted.plate[[i]] <- rep(0.085, nrow(df.predicted.plate))
+}
+
+
+melt1 <- melt(dmdata, id.vars = "Time", variable.name = "well", value.name = "OD")
+melt2 <- melt(df.predicted.plate, id.vars = "Time", variable.name = "well", value.name = "pred.OD")
+#melt1<- melt1 %>% filter(Time < 30)
+df.final <- merge(melt1, melt2, by = c("Time", "well"))
+
+#df.final <- cbind(melt1, pred.OD=melt2[,3])
+
+max.OD.df <- as.data.frame(apply(dmdata[,-1], 2, max))
+max.OD.df$sample <- row.names(max.OD.df)
+colnames(max.OD.df)[1] <- "max.OD"
+plate_summary <- merge(plate_summary, max.OD.df, by = "sample")
+
+plate_summary <- plate_summary %>%
+#  mutate(note = case_when(k < 0.1 ~ "questionable fit (k < 0.1)",
+#                          k > 1 ~ "questionable fit (k > 1)",
+#                          TRUE ~ note)) %>%
+  mutate(r = case_when(k < 0.086 ~ 0,
+                          k > 1 ~ r,
+                          TRUE ~ r)) %>%
+  mutate(k = case_when(k < 0.086 ~ 0,
+                          k > 1 ~ max.OD,
+                          TRUE ~ k))
+
+
+df.final<- df.final %>%
+  merge(., platemap, by = "well", all.y = T) %>%
+  merge(., plate_summary[,c(1,2,4,9,10)], by.x = "well", by.y = "sample")
+
+colnames(df.final)[5]<-"strain"
+colnames(df.final)[6]<-"pH"
+#df.final$strain.rep<-c(paste(df.final$strain, df.final$replicate, sep = "."))
+
+df.final<-df.final %>% filter(strain != "NEG")
+
+
+for (i in 1:length(df.final$strain)){
+  
+tmp<- df.final %>%
+  filter(strain.rep == df.final$strain[i]) %>%
+  select(well, pH, note, r, k, sigma) %>%
+  distinct(pH, .keep_all = TRUE) %>%
+  merge(., phlabs, by = "pH")
+  
+plot<-df.final %>%
+  filter(strain.rep == df.final$strain[i]) %>% 
+  ggplot(aes(x = Time, y = OD)) +
+    geom_point(alpha=0.3) +
+    geom_line(aes(y=pred.OD), color="red") +
+    ylim(0, 0.6) +
+    xlab("Time (hrs)") +
+    geom_text(tmp, mapping = aes(x = x, y = y, label =  paste("pH",label)), family = "mono") +
+    geom_text(tmp, mapping = aes(x = x+10, y = y-0.05, label = note), family = "mono") +
+    geom_text(tmp, mapping = aes(x = x, y = y+0.05, label = well), family = "mono") +
+    geom_text(tmp, mapping = aes(x = x, y = y-0.1, label = paste("r:",round(r, digits = 3))), family = "mono") +
+    geom_text(tmp, mapping = aes(x = x+10, y = y-0.15, label = paste("K:",round(k, digits = 3))), family = "mono") +
+    geom_text(tmp, mapping = aes(x = x+10, y = y-0.20, label = paste("sigma:",round(sigma, digits = 3))), family = "mono") +
+    facet_wrap(~pH, ncol = 6) +
+    labs(title = paste("pH assay for isolate",df.final$strain.rep[i]),
+         subtitle = date) +
+    apatheme +
+    theme(strip.background = element_blank(),
+          strip.text.x = element_blank(),
+          plot.title = element_text(color = "black", size = 12),
+          plot.subtitle = element_text(color = "black", size = 10))
+  
+  print(plot)
+  rm(tmp)
+  }
+
+
+#df.final %>% filter(well == "O8") %>%
+#  ggplot(aes(x = Time, y = OD)) + geom_point() +
+#  geom_line(aes(y=pred.OD), color="red")
+#  # +  ylim(0, 1)
+
+#df.final %>% filter(well == "O9") %>% arrange(Time) %>%
+#ggplot(aes(x = Time, y = OD)) + geom_point()
+#
+#ggpubr::ggarrange(ggplot(dmdata[,c(1,360)], aes(x = Time, y = O9)) + geom_point(), df.final #%>% filter(well == "O9") %>% arrange(Time) %>%
+#ggplot(aes(x = Time, y = OD)) + geom_point())
+##
+#not_fit2<-c(growth.values.plate2 %>% filter(note == "cannot fit data") %>% #select(sample))$sample
+#View(growth.values.plate2 %>% filter(note != ""))
+```
+
+### pH curve
+
+Now let's take a look at the pH curves, that is the estimated growth rate (r) as a function of the pH level. For this we are going to plot the growth rate against the pH levels.
+
+```{r pH curve, fig.width=12, fig.height = 8}
+## First let's get the parametters that growthcurver::SummarizeGrowthByPlate
+growth.values.plate <- plate_summary %>% arrange(sample) #%>% filter(note == "")
+#growth.values.plate2<-SummarizeGrowthByPlate(dmdata, t_trim = 0, bg_correct = "none")
+
+
+
+## Now let's add the strain and pH level information, as well as the date to keep track of when the assay was performed
+#growth.values.plate<-merge(x = growth.values.plate, y = platemap, by.x = "sample", by.y = "well", all.y = T)
+colnames(growth.values.plate)[11]<-"strain"
+colnames(growth.values.plate)[12]<-"pH"
+growth.values.plate<-growth.values.plate %>% filter(strain != "NEG")
+growth.values.plate$date<-rep(date, length(row.names(growth.values.plate)))
+
+pH_curve<-ggplot(growth.values.plate #%>% filter(note == "")
+                 ,
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = r)) +
+  scale_color_manual(values = taxa_colors, name = "Isolate") +
+  #geom_line() +
+  geom_smooth(aes(fill = strain)) +
+  scale_fill_manual(values = taxa_colors, name = "Isolate") +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  facet_grid(~strain) +
+  ylim(0, 0.5) +
+  labs(title = "pH curve",
+       subtitle = date) +
+  ylab("Growth rate (r)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        #strip.background = element_blank(),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "none")
+
+print(pH_curve)
+
+pH_curve_K<-ggplot(growth.values.plate #%>% filter(note == "")
+                   ,
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = k)) +
+  scale_color_manual(values = taxa_colors, name = "Isolate") +
+  #geom_line() +
+  geom_smooth(aes(fill = strain)) +
+  scale_fill_manual(values = taxa_colors, name = "Isolate") +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  facet_grid(~strain) +
+  ylim(0, 0.5) +
+  labs(title = "pH curve",
+       subtitle = date) +
+  ylab("Carrying capacity (K)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        #strip.background = element_blank(),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "none")
+
+print(pH_curve_K)
+```
+
+##### Exporting the processed data
+
+Finally, let's. export the processed data, the table with the estimated growth curve parameters so we can consolidate it all into a large data file that we will use to store all the replicates for each strain that we use for the pH assays.
+
+```{r exporting processed data}
+write.table(growth.values.plate, file = paste(here::here("data/pH/GC_values_pHassay"),date,"txt", sep = "."), sep = "\t", row.names = FALSE, quote = FALSE)
+```
