@@ -14,6 +14,11 @@
 # --- Generated outputs (regenerated from data/ by the pipeline) ---
 output/
 
+# --- Legacy / stray outputs (not part of the tracked pipeline) ---
+/plots/
+/anova_pH_results.csv
+/_test_backup/
+
 # --- Raw data (NOT distributed; obtain separately and place under data-raw/) ---
 data-raw/
 

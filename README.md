@@ -34,6 +34,7 @@ curto_phys_assays/
 │   ├── protocols/            # bench protocols (.docx, .pdf)
 │   └── design/               # experiment-planning spreadsheets (strain selection, inoculation ODs)
 ├── output/                   # ALL generated figures/tables/reports (git-ignored, auto-created)
+├── plots/                    # legacy output dir (git-ignored; some ggsave() paths still point here)
 ├── curto_phys_assays.Rproj
 ├── .gitignore
 └── README.md
@@ -145,3 +146,7 @@ packages above.
   them by pattern.
 - `output/` and `data-raw/` are git-ignored; the committed inputs under `data/`, docs
   under `docs/`, and all scripts under `R/` are tracked.
+- No generated output is tracked. A legacy `plots/` directory (a few `ggsave()` calls
+  still write PNGs there instead of under `output/`), a stray `anova_pH_results.csv`,
+  and timestamped `_test_backup/` snapshots are git-ignored and are **not** part of the
+  tracked pipeline; the canonical output location is `output/`.
