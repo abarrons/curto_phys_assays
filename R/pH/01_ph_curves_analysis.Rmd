@@ -45,1346 +45,23 @@ apatheme=theme_bw() +
         text=element_text(family='Arial'))
 
 
-#"#c5add8" "#c90076" "#8da8f3" "#fff2cc" "#ff0000" "#00ff00" "#c90077"
-```
-
-```{r set working directory and load and merge, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
-# Working directory is handled by here(); GC_values inputs live in data/pH
-files_df <- tibble(
-  path = list.files(path = here("data/pH"), pattern = "^GC_values_pHassay\\..*\\.txt$", full.names = TRUE)
-) %>%
-  mutate(
-    file = basename(path),
-    # Extract YYYY-MM-DD that appears at the end segment before .txt
-    date_str  = str_extract(file, "(?:19|20)\\d{2}-\\d{2}-\\d{2}"),
-    file_date = ymd(date_str),
-    year      = year(file_date),
-    is_2025   = (year == 2025),
-    # Extract rep number if present (rep1/rep2/rep3)
-    rep_str   = str_extract(file, "rep\\d+"),
-    plate     = if_else(is.na(rep_str), NA_character_,
-                        paste0("P", str_extract(rep_str, "\\d+")))
-  )
-
-
-# Read all files; keep filename-derived columns alongside the data
-all.data <- files_df %>%
-  mutate(dat = map(path, ~ readr::read_tsv(.x, show_col_types = FALSE))) %>%
-  select(file, file_date, year, is_2025, plate, dat) %>%
-  unnest(dat) |>
-  mutate(date = case_when(file_date == "2024-05-13" ~ file_date,
-                          file_date == "2024-04-30" ~ file_date,
-                          TRUE ~ date),
-          date = ymd(date)) |>
-  mutate(strain = case_when(strain == "Desert-08" ~ "Desert-8",
-                            TRUE ~ strain))
-
-
-
-# Quick sanity checks:
-# 1) Which files were tagged 2025 and their plate labels?
-all.data %>% distinct(file, is_2025, plate) %>% arrange(file) %>% print(n=50)
-
-# 2) If a 'date' column exists in your data files, verify it matches file_date
-if ("date" %in% names(all.data)) {
-  all.data <- all.data %>% mutate(date = ymd(date))
-  mism <- all.data %>% filter(!is.na(date), !is.na(file_date), date != file_date)
-  if (nrow(mism) > 0) {
-    message("Warning: some rows have date mismatch between file content and filename.")
-    print(mism %>% select(file, date, file_date) %>% distinct())
-  }
-}
-
-
 
 ```
 
+#### Helper functions
 
-### Number of assays and ANOVAS for each pH level and strain across date of the assay
+General-purpose functions used throughout this analysis are collected here so they are defined before any downstream chunk calls them.
 
-```{r number of assays summary and ANOVAS, message=FALSE, warning=FALSE, echo=FALSE, fig.height=18, fig.width=12}
+**`%||%`** — Null-coalescing operator: returns `a` unless it is `NULL`, in which case it returns `b`.
 
-## Let's get the metadata info for each strain. For that we need to read in the master metadata table.
-master_md <- read.table(here("data/shared/master_md_all_sequenced_Isolates_with_extendedMD.txt"), header = T, sep = "\t")
-
-master_md <- master_md %>% select(genomeID, Name, clade, subclade)
-
-
-clade_info <- merge(all.data, master_md, by.x = "strain", by.y = "Name", all.x = T) %>% select(strain, clade, subclade) %>% distinct()
-
-all.data <-merge(all.data, clade_info, by = "strain", all.x = T)
-
-
-all.data$strain.date<-c(paste(all.data$strain, all.data$date, sep = "."))
-all.data$strain.rep<-c(paste(all.data$strain, all.data$replicate, sep = "."))
-all.data$strain.date.rep<-c(paste(all.data$strain, all.data$date, all.data$replicate, sep = "."))
-
-
-
-all.data$date <- as.Date(all.data$date)
-
-#now let's match the clade colors to the metadata
-clade_colors <- read.table(here("data/shared/clade_colors.txt"), header = T, sep = "\t", comment.char = "")
-all.data$clade_color <- clade_colors$color[match(all.data$clade, clade_colors$variable)]
-all.data$subclade_color <- clade_colors$color[match(all.data$subclade, clade_colors$variable)]
-
-subclade_colors_vec <- clade_colors |>
-  tibble::deframe()
-
-
-all.data_25 <- all.data %>%
-  filter(!is.na(replicate)) %>%
-  filter(year(date) == 2025)
-
-
-
-# Assumes all.data has: strain, date, plate, (optionally replicate/well-level)
-# 1) Count replication structure per strain
-rep_summary <- all.data %>%
-  mutate(date = as.Date(date)) %>%
-  group_by(strain) %>%
-  summarise(
-    n_dates  = n_distinct(date, na.rm = TRUE),
-    # count unique plate runs; if older data lack `plate`, treat each date as one plate
-    n_plates = n_distinct(ifelse(is.na(plate),
-                                 paste0("date:", date),        # fallback: 1 plate per date
-                                 paste0(date, "::", plate) ),  # plate identities within date
-                           na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    replication_type = case_when(
-      n_dates >= 2 ~ "multi-date",
-      n_dates == 1 & n_plates >= 2 ~ "single-date_multi-plate",
-      TRUE ~ "single-date_single-plate"
-    ),
-    keep = (n_dates >= 2) | (n_dates == 1 & n_plates >= 2)
-  )
-
-# 2) Join clade info and keep strains per rule
-rep_keep <- rep_summary %>%
-  left_join(clade_info, by = "strain") %>%
-  filter(keep)
-
-rep_keep |>
-  group_by(clade) |>
-  count() |>
-  print(n = 21)
-
-rep_keep |>
-  group_by(clade, subclade) |>
-  count() |>
-  print(n = 21)
-
-
-
-
-
-# rep_keep now has the strains you’ll include
-# If you still want a dataframe at the row level filtered to these strains:
-all_kept <- all.data %>%
-  semi_join(rep_keep %>% select(strain), by = "strain")
-
-
-
-
-#all.data %>%
-#  filter(!is.na(replicate)) %>%
-#  #group_by(strain, date) %>%
-#  count(strain, date) %>% 
-#  #tally() #%>%
-#  count(strain) %>% 
-#  mutate(Replicates = n) %>%
-#  merge(., clade_info, by = "strain", all.x = T) %>%
-#  #group_by(strain) %>%
-#  #count(strain) #%>% 
-#  select(-n) %>% filter(Replicates >=2)
-#
-#
-#all.data %>%
-#  filter(!is.na(replicate)) %>%
-#  #group_by(strain, date) %>%
-#  count(strain, date) %>% 
-#  #tally() #%>%
-#  count(strain) %>% 
-#  mutate(Replicates = n) %>%
-#  merge(., clade_info, by = "strain", all.x = T) %>%
-#  select(-n) %>% 
-#  count(clade)
-
-all.data <- all.data %>% filter(strain.date != "35G2A07.2023-07-19") |> filter(r < 2)
-
-
-
-all_kept <- all.data %>%
-  semi_join(rep_keep %>% select(strain), by = "strain")
-
-
-data_cleaned <- all.data %>%
-  filter(!is.na(replicate)) %>%            # your original filter
-  select(strain, pH, date, plate, r, k) %>%
-  drop_na(strain, pH, r) %>%
-  mutate(
-    date  = as.Date(date),                 # keep as Date
-    plate = as.factor(plate)
-  )
-
-
-
-# run the appropriate ANOVA per (strain, pH)
-anova_results <- data_cleaned %>%
-  group_by(strain, pH) %>%
-  group_modify(function(.x, .key) {
-    nd <- n_distinct(.x$date)
-    np <- n_distinct(.x$plate)
-
-    if (nd >= 2) {
-      fit <- aov(r ~ date, data = .x)
-      broom::tidy(fit) %>%
-        filter(term == "date") %>%
-        mutate(test_factor = "date",
-               n_dates = nd, n_plates = np)
-    } else if (nd == 1 && np >= 2) {
-      fit <- aov(r ~ plate, data = .x)
-      broom::tidy(fit) %>%
-        filter(term == "plate") %>%
-        mutate(test_factor = "plate",
-               n_dates = nd, n_plates = np)
-    } else {
-      tibble(
-        term = "none", df = NA_real_, sumsq = NA_real_, meansq = NA_real_,
-        statistic = NA_real_, p.value = NA_real_,
-        test_factor = "insufficient",
-        n_dates = nd, n_plates = np
-      )
-    }
-  }) %>%
-  ungroup()
-
-# BH correction within strain (optional but recommended)
-anova_results <- anova_results %>%
-  group_by(strain) %>%
-  mutate(p_adj = p.adjust(p.value, method = "BH")) %>%
-  ungroup()
-
-
-# join clade metadata
-final.table <- anova_results %>%
-  left_join(clade_info, by = "strain")
-
-# ---- robust color vectors (avoid duplicates from row-level all.data) ----
-## create strings to color by:
-## clade:
-clade_col <- as.character(all.data$clade_color)
-names(clade_col) <- as.character(all.data$clade)
-# strain by clade color
-strain_clade_col <- as.character(all.data$clade_color)
-names(strain_clade_col) <- as.character(all.data$strain)
-
-## subclade:
-subclade_col <- as.character(all.data$subclade_color)
-names(subclade_col) <- as.character(all.data$subclade)
-# strain by clade color
-strain_subclade_col <- as.character(all.data$subclade_color)
-names(strain_subclade_col) <- as.character(all.data$strain)
-
-clade_color_vector <- setNames(clade_colors$color, clade_colors$variable)
-
-
-# ---- plot: show which factor was tested ----
-
-ggplot(
-  final.table %>% filter(test_factor != "insufficient"),
-  aes(x = pH, y = p.value, color = clade, shape = test_factor)
-) +
-  geom_point(size = 2.8, alpha = 0.9) +
-  geom_hline(yintercept = 0.05, linetype = "dashed") +
-  scale_color_manual(values = clade_col) +
-  scale_shape_manual(values = c(date = 16, plate = 17)) +  # circle vs triangle
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
-  labs(
-    title = "ANOVA p-values testing within-group variation of r",
-    subtitle = "If ≥2 dates → test by date; else if 1 date & ≥2 plates → test by plate",
-    y = "p value"
-  ) +
-  facet_wrap(strain ~ .) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-
-
-
-
-data_cleaned <- all.data %>% filter(!is.na(replicate)) %>% 
-  select(strain, pH, date, r, k) %>%
-  drop_na() %>%
-  mutate(date = as.factor(date))
-
-data_filtered <- data_cleaned %>%
-  group_by(strain, pH) %>%
-  filter(n_distinct(date) > 1) %>%
-  ungroup()
-
-anova_results <- data_filtered %>%
-  group_by(strain, pH) %>%
-  nest() %>%
-  mutate(aov_result = map(data, ~aov(r ~ date, data = .)),
-         anova_summary = map(aov_result, tidy)) %>%
-  ungroup()
-
-
-final.table <- anova_results %>%
-  select(strain, pH, anova_summary) %>%
-  mutate(anova_summary = map(anova_summary, ~filter(.x, term == "date"))) %>%
-  unnest(anova_summary)
-
-final.table <- merge(final.table, clade_info, by = "strain", all.x = T)
-
-write.csv(final.table, file = "anova_pH_results.csv", row.names = FALSE)
-
-## create strings to color by:
-## clade:
-clade_col <- as.character(all.data$clade_color)
-names(clade_col) <- as.character(all.data$clade)
-# strain by clade color
-strain_clade_col <- as.character(all.data$clade_color)
-names(strain_clade_col) <- as.character(all.data$strain)
-
-## subclade:
-subclade_col <- as.character(all.data$subclade_color)
-names(subclade_col) <- as.character(all.data$subclade)
-# strain by clade color
-strain_subclade_col <- as.character(all.data$subclade_color)
-names(strain_subclade_col) <- as.character(all.data$strain)
-
-
-
-ggplot(final.table,
-       aes(x = pH,
-                    color = clade,
-                    group = clade,
-                    y = p.value)) +
-  geom_point(size = 3) +
-  geom_hline(yintercept = 0.05, color = "red", linetype = "dashed") +
-  scale_color_manual(values = clade_col) +
-  #ggbreak::scale_y_cut(c(0.01), which = c(2), scales = c(1, 3)) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
-  #ylim(0, 0.5) +
-  labs(title = "p Values for ANOVA results testing the effect of date (of the assay) on the growth rate for each pH and strain") +
-  ylab("p value") +
-  facet_wrap(strain~.) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-  
-
+```{r helper-null-coalesce, message=FALSE, warning=FALSE}
+# helper for a safe default (returns b if a is NULL)
+`%||%` <- function(a, b) if (is.null(a)) b else a
 ```
 
-### pH preference curves for r, K and AUC
+**`calculate_auc`** — Fit loess curves of growth rate (r) and carrying capacity (K) against pH for a strain and return the trapezoidal area under each curve (AUC).
 
-Mean growth rate  (r) carrying capacity (K) and Area Under the Curve (AUC), and  S.D. for each parameter, for each combination of strain and pH level.
-
-```{r summarized pH curve, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
-table.sum<-all.data %>%
-  filter(!is.na(replicate)) %>%
-  dplyr::group_by(strain, pH) %>%
-  dplyr::summarize(r_mean = mean(r),
-                   r_sd = sd(r),
-                   k_mean = mean(k),
-                   k_sd = sd(k),
-                   auc_e_mean = mean(auc_e),
-                   auc_e_sd = sd(auc_e)) %>%
-  merge(., clade_info, by = "strain", all.x = T)
-
-
-table.sum.date<-all.data %>%
-  filter(!is.na(replicate)) %>%
-  dplyr::group_by(strain, pH, date) %>%
-  dplyr::summarize(r_mean = mean(r),
-                   r_sd = sd(r),
-                   k_mean = mean(k),
-                   k_sd = sd(k),
-                   auc_e_mean = mean(auc_e),
-                   auc_e_sd = sd(auc_e)) %>%
-  merge(., clade_info, by = "strain", all.x = T)
-
-
-# make a stable id you can join on
-all.data <- all.data %>%
-  mutate(id_sdp = paste(strain, date, plate, sep = "|"))
-
-
-random_ids <- all.data %>%
-  filter(!is.na(replicate)) %>%
-  group_by(strain, date, plate) %>%
-  dplyr::sample_n(1) %>%       # dplyr >=1.1: use slice_sample not sample_n
-  ungroup() %>%
-  pull(id_sdp)
-
-
-random_data <- all.data %>%
-  filter(id_sdp %in% random_ids) %>%
-  group_by(strain, pH) %>%
-  summarise(
-    r_mean     = mean(r, na.rm = TRUE),
-    r_sd       = sd(r, na.rm = TRUE),
-    k_mean     = mean(k, na.rm = TRUE),
-    k_sd       = sd(k, na.rm = TRUE),
-    auc_e_mean = mean(auc_e, na.rm = TRUE),
-    auc_e_sd   = sd(auc_e, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  merge(clade_info, by = "strain", all.x = TRUE) %>%
-  filter(!strain %in% c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
-
-#random_strain.reps <- all.data %>%
-#  filter(!is.na(replicate)) %>%
-#  group_by(strain, date) %>%
-#  sample_n(1) %>%
-#  ungroup() %>%
-#  select(strain.date.rep)
-#
-#random_data <- all.data %>%
-#  filter(strain.date.rep %in% random_strain.reps$strain.date.rep) %>%
-#  dplyr::group_by(strain, pH) %>%
-#  dplyr::summarize(r_mean = mean(r),
-#                   r_sd = sd(r),
-#                   k_mean = mean(k),
-#                   k_sd = sd(k),
-#                   auc_e_mean = mean(auc_e),
-#                   auc_e_sd = sd(auc_e)) %>%
-#  merge(., clade_info, by = "strain", all.x = T) %>%
-#  filter(!strain %in% c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
-
-
-
-
-## pH preference curve values averaged by date of the assay for each pH vale and strain
-
-pH_curve_all_mean_by_date<-ggplot(table.sum.date |> mutate(date = as.factor(date))
-                 ,
-                 aes(x = pH,
-                    color = subclade,
-                    group = subclade,
-                    y = r_mean,
-                    shape = date)) +
-  scale_color_manual(values = subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = subclade)) +
-  scale_fill_manual(values = subclade_col) +
-  geom_point(size = 2) +
-  geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  facet_wrap(clade~strain) +
-  ylim(0, 0.6) +
-  labs(title = "pH preference curve for growth rate (r)",
-       subtitle = "avg. r by pH level and date") +
-  ylab("Growth rate (r)") +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-        #strip.background = element_blank(),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 12),
-        plot.subtitle = element_text(color = "black", size = 10),
-        legend.position = "bottom")
-
-print(pH_curve_all_mean_by_date)
-
-
-pH_curve_all<-ggplot(all.data %>% filter(!is.na(replicate)) |> mutate(date = as.factor(date))
-                 ,
-                 aes(x = pH,
-                    color = subclade,
-                    group = subclade,
-                    y = r
-                    , shape = date
-                    )) +
-  scale_color_manual(values = subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = subclade)) +
-  scale_fill_manual(values = subclade_col) +
-  geom_point(size = 2) +
-  scale_shape_manual(values = c(0:30)) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  facet_wrap(clade~strain) +
-  ylim(0, 0.6) +
-  labs(title = "pH preference curve for growth rate (r)",
-       subtitle = "all values") +
-  ylab("Growth rate (r)") +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-        #strip.background = element_blank(),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 12),
-        plot.subtitle = element_text(color = "black", size = 10),
-        legend.position = "bottom")
-
-print(pH_curve_all)
-
-
-strains_to_filter <- c("25G4A05", "18G3A05", "23G3B04", "04G1A01", "24G2B02", "35D04", "35G4A01", "18G4B09", "24G4A05", "25G4B06", "28G1A08", "41G3A07", "18G1A07", "23G1B10", "24G2B09", "28G4A05", "28G4B01")
-
-bad_strains <- table.sum %>%
-  group_by(strain) %>%
-  summarise(
-    n_total = n(),
-    n_zero  = sum(r_mean == 0, na.rm = TRUE),
-    frac_zero = n_zero / n_total
-  ) %>%
-  filter(frac_zero >= 0.9)
-
-strains_to_filter <- unique(c(strains_to_filter, bad_strains$strain))
-
-
-for (cld in c("I", "II","III", "IV")) {
-  
-   # get all strains in this subclade
-  all_strains <- table.sum %>%
-    filter(!strain %in% strains_to_filter &
-             clade != "UND" &
-             !is.na(subclade)) %>%
-    filter(clade == cld) %>%
-    arrange(subclade) |> 
-    pull(strain) %>%
-    unique()
-  
-   # split into chunks of up to 16
-  strain_chunks <- split(all_strains, 
-                         ceiling(seq_along(all_strains) / 16))
-  
-  # loop over each chunk (page)
-  for (i in seq_along(strain_chunks)) {
-    this_strains <- strain_chunks[[i]]
-
-    pH_curve <- table.sum |>
-      filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-      filter(clade == cld, strain %in% this_strains) |> 
-      mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |> 
-      ggplot(aes(x = pH,
-                          color = subclade,
-                          group = subclade,
-                          y = r_mean)) +
-        scale_color_manual(values = subclade_col, guide = "none") +
-        #geom_line() +
-        geom_smooth(aes(fill = subclade), linewidth = 0.5) +
-        scale_fill_manual(values = subclade_col, guide = "none") +
-        geom_point(size = 1) +
-        geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-        scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-        ggh4x::facet_nested_wrap(subclade~strain, ncol = 4) +
-        ylim(0, 0.6) +
-        #labs(title = "pH preference for different Curtobacterium Isolates"
-             #,
-             #subtitle = "avg. growth rathe (r) by pH level"
-        #     ) +
-        ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
-        apatheme +
-        theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-              text = element_text(size = 8),
-              strip.background = element_blank(),
-              #strip.text.x = element_blank(),
-              plot.title = element_text(color = "black", size = 8),
-              plot.subtitle = element_text(color = "black", size = 6),
-              legend.position = "bottom")
-      
-      print(pH_curve)
-      
-      # now save it
-    fn <- sprintf("plots/pH_curves/pH_curves_%s_page%02d.png", cld, i)
-    ggsave(
-      filename = fn,
-      plot     = pH_curve,
-      width    = 160,
-      height   = 120,
-      units    = "mm",
-      dpi      = 300
-    )
-    }
-  }
-  
-  
-  
-  
-   pH_curve_rndm_clades<-ggplot(random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-  mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean))
-                 ,
-                 aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = r_mean)) +
-  scale_color_manual(values = strain_clade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.85, alpha = 0.65) +
-  scale_fill_manual(values = strain_clade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  facet_grid(~clade, space = "free") +
-  ylim(0, 0.6) +
-  #labs(title = "pH pwerformance",
-  #     subtitle = substitute(paste("mean growth rate (", italic("r"), ") by pH level"))) +
-  #ylab(substitute(paste("Growth rate (", italic("r"), ") +/- S.D."))) +
-  ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
-        axis.text.y = element_text(size = 20),
-        strip.background.x = element_blank(),
-        text = element_text(size = 35),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 18),
-        plot.subtitle = element_text(color = "black", size = 16),
-        legend.position = "none")
-
-print(pH_curve_rndm_clades)
-
-ggsave("plots/pH_curve_1rp_by_date_clades.png",
-       width = 30,
-       height = 10,
-       units = "cm",
-       dpi = 600)
-
-
-
-clade_cols <- c(
-  "I"   = "#7171FF",
-  "II"  = "#EEC900",
-  "III" = "#FF0000",
-  "IV"  = "#DC89FF"
-)
-
-
-
-pH_curve_rndm_subclades<-ggplot(random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-  mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean))
-                 ,
-                 aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = r_mean)) +
-  scale_color_manual(values = strain_subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.85, alpha = 0.65) +
-  scale_fill_manual(values = strain_subclade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  # here’s the magic:
-  ggh4x::facet_nested( ~clade + subclade,
-    nest_line = element_line(linetype = 2),
-    drop       = TRUE, # <— ensure unused combos get dropped
-    strip     = ggh4x::strip_nested(
-      # background for the top-level (clade) and second-level (subclade) strips
-      background_x = ggh4x::elem_list_rect(
-        fill = c(clade_cols, rep("white", 14)),  # one rect per clade level
-        by_layer_x = F)
-    )
-  ) +
-  ylim(0, 0.6) +
-  #labs(title = "pH pwerformance",
-  #     subtitle = substitute(paste("mean growth rate (", italic("r"), ") by pH level"))) +
-  #ylab(substitute(paste("Growth rate (", italic("r"), ") +/- S.D."))) +
-  ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
-        axis.text.y = element_text(size = 20),
-        strip.background.x = element_blank(),
-        text = element_text(size = 35),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 18),
-        plot.subtitle = element_text(color = "black", size = 16),
-        legend.position = "none")
-
-print(pH_curve_rndm_subclades)
-
-ggsave("plots/pH_curve_1rp_by_date_subclades.png",
-       width = 60,
-       height = 10,
-       units = "cm",
-       dpi = 600)
-
-
-pH_curve_rndm_TopSubclades <- random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade) &
-                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
-  mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |> 
-  ggplot(
-                 aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = r_mean)) +
-  scale_color_manual(values = strain_subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.85, alpha = 0.65) +
-  scale_fill_manual(values = strain_subclade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  # here’s the magic:
-  ggh4x::facet_nested( ~subclade) +
-  ylim(0, 0.6) +
-  #labs(title = "pH pwerformance",
-  #     subtitle = substitute(paste("mean growth rate (", italic("r"), ") by pH level"))) +
-  #ylab(substitute(paste("Growth rate (", italic("r"), ") +/- S.D."))) +
-  ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
-        axis.text.y = element_text(size = 16),
-        strip.background.x = element_blank(),
-        text = element_text(size = 14),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 18),
-        plot.subtitle = element_text(color = "black", size = 16),
-        legend.position = "none") 
-
-print(pH_curve_rndm_TopSubclades)
-
-ggsave("plots/pH_curve_1rp_by_date_TopSubclades.png",
-       width = 30,
-       height = 7.5,
-       units = "cm",
-       dpi = 600)
-
-random_avg <- random_data |>
-  group_by(subclade, pH) |>
-  summarise(avg_r = mean(r_mean)) |>
-  mutate(avg_r = if_else(pH %in% c(9.8, 10.1) & avg_r > 0.00001, 0, avg_r))
-
-
-
-pH_curve_avg_subclades <- random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade) &
-                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
-   mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |>
-   ggplot(aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = r_mean)) +
-  scale_color_manual(values = strain_subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.1, alpha = 0.25) +
-  scale_fill_manual(values = strain_subclade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = #seq(3.2, 10.1, 0.6)
-                       c(3.2, 6.6, 10.1)) +
-      # 2) tell ggplot we want a *new* colour scale
-      ggnewscale::new_scale_color() +
-      geom_smooth(data = random_avg |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
-                 aes(pH, avg_r, color = subclade, fill = subclade), alpha = 0.35,
-                 method = "gam",
-                 inherit.aes = F,
-                linewidth = 0.75,
-                se = T) +
-      scale_colour_manual(name   = "Subclade",
-                          values = subclade_colors_vec) +
-      scale_fill_manual(name   = "Subclade",
-                              values = subclade_colors_vec) +
-      ylim(0, 0.6) +
-      facet_wrap(.~ subclade, nrow = 1) +
-      #labs(title = "Temperature performance",
-           #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))) +
-      #ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
-      ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
-      xlab("pH") +
-      apatheme +
-      theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 4.5),
-            axis.text.y = element_text(size = 6),
-            strip.background = element_blank(),
-            text = element_text(size = 8),
-            #strip.text.x = element_blank(),
-            plot.title = element_text(color = "black", size = 18),
-            plot.subtitle = element_text(color = "black", size = 16),
-            legend.position = "none",
-            #legend.position = c(0.95,0.85),
-            #legend.justification = c(1, 1),         # anchor legend’s top-right corner
-    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
-                                        colour = NA),
-    legend.title         = element_text(size = 5),
-    legend.text          = element_text(size = 4),
-    legend.margin        = margin(rep(1,4)))
-print(pH_curve_avg_subclades)
-
-```
-
-### pH curves for K
-
-```{r pH curves for K, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
-
-#ggpubr::ggarrange(pH_curve, pH_curve_rndm_clades, common.legend = T, legend = "bottom", ncol = 2)
-
-pH_curve_k<-ggplot(table.sum,
-                 aes(x = pH,
-                    color = subclade,
-                    group = subclade,
-                    y = k_mean)) +
-  scale_color_manual(values = subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = subclade)) +
-  scale_fill_manual(values = subclade_col) +
-  geom_point(size = 2) +
-  geom_errorbar(aes(ymin = k_mean-k_sd, ymax = k_mean+k_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  facet_wrap(strain~.) +
-  ylim(0, 0.6) +
-  labs(title = "pH preference curve for carrying capacity (K)",
-       subtitle = "avg. K by pH level") +
-  ylab("Carrying capacity (K)") +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-        #strip.background = element_blank(),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 12),
-        plot.subtitle = element_text(color = "black", size = 10),
-        legend.position = "bottom")
-
-print(pH_curve_k)
-
-
-for (cld in c("I", "II","III", "IV")) {
-  
-   # get all strains in this subclade
-  all_strains <- table.sum %>%
-    filter(!strain %in% strains_to_filter &
-             clade != "UND" &
-             !is.na(subclade)) %>%
-    filter(clade == cld) %>%
-    arrange(subclade) |> 
-    pull(strain) %>%
-    unique()
-  
-   # split into chunks of up to 16
-  strain_chunks <- split(all_strains, 
-                         ceiling(seq_along(all_strains) / 16))
-  
-  # loop over each chunk (page)
-  for (i in seq_along(strain_chunks)) {
-    this_strains <- strain_chunks[[i]]
-
-    pH_curve <- table.sum |>
-      filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-      filter(clade == cld, strain %in% this_strains) |> 
-      mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean)) |> 
-      ggplot(aes(x = pH,
-                          color = subclade,
-                          group = subclade,
-                          y = k_mean)) +
-        scale_color_manual(values = subclade_col, guide = "none") +
-        #geom_line() +
-        geom_smooth(aes(fill = subclade), linewidth = 0.5) +
-        scale_fill_manual(values = subclade_col, guide = "none") +
-        geom_point(size = 1) +
-        geom_errorbar(aes(ymin = k_mean-k_sd, ymax = k_mean+k_sd), width = .2) +
-        scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-        ggh4x::facet_nested_wrap(subclade~strain, ncol = 4) +
-        ylim(0, 0.6) +
-        #labs(title = "pH preference for different Curtobacterium Isolates"
-             #,
-             #subtitle = "avg. growth rathe (r) by pH level"
-        #     ) +
-        labs(y = expression("Yield (OD" [600] * ")")) +
-        apatheme +
-        theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-              text = element_text(size = 8),
-              strip.background = element_blank(),
-              #strip.text.x = element_blank(),
-              plot.title = element_text(color = "black", size = 8),
-              plot.subtitle = element_text(color = "black", size = 6),
-              legend.position = "bottom")
-      
-      print(pH_curve)
-      
-      # now save it
-    fn <- sprintf("plots/pH_curves/pH_curves_K_%s_page%02d.png", cld, i)
-    ggsave(
-      filename = fn,
-      plot     = pH_curve,
-      width    = 160,
-      height   = 120,
-      units    = "mm",
-      dpi      = 300
-    )
-    }
-  }
-  
-  
-  
-  
-   pH_curve_rndm_clades_K<-ggplot(random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-  mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean))
-                 ,
-                 aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = k_mean)) +
-  scale_color_manual(values = strain_clade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.85, alpha = 0.65) +
-  scale_fill_manual(values = strain_clade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  facet_grid(~clade, space = "free") +
-  ylim(0, 0.6) +
-  #labs(title = "pH pwerformance",
-  #     subtitle = substitute(paste("mean growth rate (", italic("r"), ") by pH level"))) +
-  #ylab(substitute(paste("Growth rate (", italic("r"), ") +/- S.D."))) +
-  labs(y = expression("Yield (OD" [600] * ")")) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
-        axis.text.y = element_text(size = 20),
-        strip.background.x = element_blank(),
-        text = element_text(size = 35),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 18),
-        plot.subtitle = element_text(color = "black", size = 16),
-        legend.position = "none")
-
-print(pH_curve_rndm_clades_K)
-
-ggsave("plots/pH_curve_1rp_by_date_clades_K.png",
-       width = 30,
-       height = 10,
-       units = "cm",
-       dpi = 600)
-
-
-
-clade_cols <- c(
-  "I"   = "#7171FF",
-  "II"  = "#EEC900",
-  "III" = "#FF0000",
-  "IV"  = "#DC89FF"
-)
-
-
-
-pH_curve_rndm_subclades_K<-ggplot(random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-  mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean))
-                 ,
-                 aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = k_mean)) +
-  scale_color_manual(values = strain_subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.85, alpha = 0.65) +
-  scale_fill_manual(values = strain_subclade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  # here’s the magic:
-  ggh4x::facet_nested( ~clade + subclade,
-    nest_line = element_line(linetype = 2),
-    drop       = TRUE, # <— ensure unused combos get dropped
-    strip     = ggh4x::strip_nested(
-      # background for the top-level (clade) and second-level (subclade) strips
-      background_x = ggh4x::elem_list_rect(
-        fill = c(clade_cols, rep("white", 14)),  # one rect per clade level
-        by_layer_x = F)
-    )
-  ) +
-  ylim(0, 0.6) +
-  #labs(title = "pH pwerformance",
-  #     subtitle = substitute(paste("mean growth rate (", italic("r"), ") by pH level"))) +
-  #ylab(substitute(paste("Growth rate (", italic("r"), ") +/- S.D."))) +
-  labs(y = expression("Yield (OD" [600] * ")")) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
-        axis.text.y = element_text(size = 20),
-        strip.background.x = element_blank(),
-        text = element_text(size = 35),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 18),
-        plot.subtitle = element_text(color = "black", size = 16),
-        legend.position = "none")
-
-print(pH_curve_rndm_subclades_K)
-
-ggsave("plots/pH_curve_1rp_by_date_subclades_K.png",
-       width = 60,
-       height = 10,
-       units = "cm",
-       dpi = 600)
-
-
-pH_curve_rndm_TopSubclades_K <- random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade) &
-                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
-  mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean)) |> 
-  ggplot(
-                 aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = k_mean)) +
-  scale_color_manual(values = strain_subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.85, alpha = 0.65) +
-  scale_fill_manual(values = strain_subclade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  # here’s the magic:
-  ggh4x::facet_nested( ~subclade) +
-  ylim(0, 0.6) +
-  #labs(title = "pH pwerformance",
-  #     subtitle = substitute(paste("mean growth rate (", italic("r"), ") by pH level"))) +
-  #ylab(substitute(paste("Growth rate (", italic("r"), ") +/- S.D."))) +
-  labs(y = expression("Yield (OD" [600] * ")")) +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
-        axis.text.y = element_text(size = 16),
-        strip.background.x = element_blank(),
-        text = element_text(size = 14),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 18),
-        plot.subtitle = element_text(color = "black", size = 16),
-        legend.position = "none") 
-
-print(pH_curve_rndm_TopSubclades_K)
-
-ggsave("plots/pH_curve_1rp_by_date_TopSubclades_K.png",
-       width = 30,
-       height = 7.5,
-       units = "cm",
-       dpi = 600)
-
-random_avg_k <- random_data |>
-  group_by(subclade, pH) |>
-  summarise(avg_k = mean(k_mean)) |>
-  mutate(avg_k = if_else(pH %in% c(9.8, 10.1) & avg_k > 0.00001, 0, avg_k))
-
-
-pH_curve_avg_subclades_K <- random_data %>%
-                        filter(!strain %in% strains_to_filter &
-                                 clade != "UND" & !is.na(subclade) &
-                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
-   mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean)) |>
-   ggplot(aes(x = pH,
-                    color = strain,
-                    group = strain,
-                    y = k_mean)) +
-  scale_color_manual(values = strain_subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = strain),
-              se = F, linewidth = 0.1, alpha = 0.25) +
-  scale_fill_manual(values = strain_subclade_col) +
-  #geom_point(size = 2) +
-  #geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-  scale_x_continuous(breaks = #seq(3.2, 10.1, 0.6)
-                       c(3.2, 6.6, 10.1)) +
-      # 2) tell ggplot we want a *new* colour scale
-      ggnewscale::new_scale_color() +
-      geom_smooth(data = random_avg_k |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
-                 aes(pH, avg_k, color = subclade, fill = subclade), alpha = 0.35,
-                 method = "gam",
-                 inherit.aes = F,
-                linewidth = 0.75,
-                se = T) +
-      scale_colour_manual(name   = "Subclade",
-                          values = subclade_colors_vec) +
-      scale_fill_manual(name   = "Subclade",
-                              values = subclade_colors_vec) +
-      ylim(0, 0.4) +
-      facet_wrap(.~ subclade, nrow = 1) +
-      #labs(title = "Temperature performance",
-           #subtitle = substitute(paste("mean growth rate (", italic("r"), ") by Temperature"))) +
-      #ylab(substitute(paste("Growth rate (", italic("r"),")"))) +
-      labs(y = expression("Yield (OD" [600] * ")")) +
-      xlab("pH") +
-      apatheme +
-      theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 4.5),
-            axis.text.y = element_text(size = 6),
-            strip.background = element_blank(),
-            text = element_text(size = 8),
-            #strip.text.x = element_blank(),
-            plot.title = element_text(color = "black", size = 18),
-            plot.subtitle = element_text(color = "black", size = 16),
-            legend.position = "none",
-            #legend.position = c(0.95,0.85),
-            #legend.justification = c(1, 1),         # anchor legend’s top-right corner
-    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
-                                        colour = NA),
-    legend.title         = element_text(size = 5),
-    legend.text          = element_text(size = 4),
-    legend.margin        = margin(rep(1,4)))
-print(pH_curve_avg_subclades_K)
-
-
-pH_curve_avgOnly_subclades_K <- random_avg_k |>
-  filter(subclade  %in% c("IC", "IIG", "IIIA", "IVB")) |>
-   ggplot() +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)
-                       #c(3.2, 6.6, 10.1)
-                     ) +
-      geom_smooth(
-                 aes(pH, avg_k, color = subclade, fill = subclade), alpha = 0.35,
-                 method = "gam",
-                 inherit.aes = F,
-                linewidth = 0.75,
-                se = F,
-                key_glyph = "rect") +
-      scale_colour_manual(name   = "Subclade",
-                          values = subclade_colors_vec) +
-      scale_fill_manual(name   = "Subclade",
-                              values = subclade_colors_vec) +
-          # change legend keys from line to square
-      guides(
-        colour = guide_legend(
-          override.aes = list(
-            shape = 22,   # 22 = filled square (uses both color & fill)
-            size  = 1,
-            linetype = 2,  # remove line segment in legend
-            fill = clade_color_vector[names(clade_color_vector)  %in% c("IC", "IIG", "IIIA", "IVB")],
-            alpha = 0.95
-          )
-        ),
-        fill = "none"     # hide separate fill legend, keep just one
-      ) +
-      ylim(0, 0.5) +
-      labs(y = expression("Yield (OD" [600] * ")")) +
-      xlab("pH") +
-      apatheme +
-      theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 6),
-            axis.text.y = element_text(size = 6),
-            strip.background = element_blank(),
-            text = element_text(size = 8),
-            legend.position = "inside",
-            legend.position.inside = c(0.8, 0.85),
-            legend.background = element_rect(fill = alpha("white", 0), color = NA),
-            legend.key = element_rect(fill = NA),
-            legend.key.size = unit(0.3, "lines"),
-            legend.title = element_text(size = 11,
-                                        margin = margin(b = 0, unit = "pt")),
-            legend.text = element_text(size = 10),
-            legend.key.height = unit(0.4, "lines"),
-            legend.key.width = unit(0.7, "lines"),
-            legend.spacing.y = unit(0, "cm"))
-print(pH_curve_avgOnly_subclades_K)
-
-
-
-pH_curve_auc<-ggplot(table.sum,
-                 aes(x = pH,
-                    color = subclade,
-                    group = subclade,
-                    y = auc_e_mean)) +
-  scale_color_manual(values = subclade_col) +
-  #geom_line() +
-  geom_smooth(aes(fill = subclade)) +
-  scale_fill_manual(values = subclade_col) +
-  geom_point(size = 2) +
-  geom_errorbar(aes(ymin = auc_e_mean-auc_e_sd, ymax = auc_e_mean+auc_e_sd), width = .2) +
-  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-  facet_wrap(strain~.) +
-  #ylim(0, 0.6) +
-  labs(title = "pH preference curve for Area Under the Curve (AUC)",
-       subtitle = "avg.AUC by pH level") +
-  ylab("Area under the curve (AUC)") +
-  apatheme +
-  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-        #strip.background = element_blank(),
-        #strip.text.x = element_blank(),
-        plot.title = element_text(color = "black", size = 12),
-        plot.subtitle = element_text(color = "black", size = 10),
-        legend.position = "bottom")
-
-print(pH_curve_auc)
-
-```
-
-##### Summary of strains assayed
-
-```{r}
-
-setdiff(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
-intersect(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
-union(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
-
-
-length(unique(c(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))))
-
-length(unique(all.data$strain))
-length(unique(all.data$strain)[!unique(all.data$strain)  %in% strains_to_filter])
-
-length(strains_to_filter)
-
-
-all_strains_to_filter <- unique(c(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03")))
-
-length(all_strains_to_filter)
-
-
-## ok strains
-all.data |> distinct(strain, .keep_all = T) |> 
-  filter(!strain %in% all_strains_to_filter) |> 
-  group_by(clade) |> count()
-
-all.data |> distinct(strain, .keep_all = T) |> 
-  filter(!strain %in% all_strains_to_filter) |> 
-  group_by(subclade) |> count()
-
-## not ok strains
-
-all.data |> distinct(strain, .keep_all = T) |> 
-  filter(strain %in% all_strains_to_filter) |> 
-  group_by(clade) |> count()
-
-all.data |> distinct(strain, .keep_all = T) |> 
-  filter(strain %in% all_strains_to_filter) |> 
-  group_by(subclade) |> count()
-
-
-for (cld in c("I", "II","III", "IV")) {
-  
-   # get all strains in this subclade
-  all_strains <- table.sum %>%
-    filter(strain %in% all_strains_to_filter &
-             clade != "UND" &
-             !is.na(subclade)) %>%
-    filter(clade == cld) %>%
-    arrange(subclade) |> 
-    pull(strain) %>%
-    unique()
-  
-   # split into chunks of up to 16
-  strain_chunks <- split(all_strains, 
-                         ceiling(seq_along(all_strains) / 16))
-  
-  # loop over each chunk (page)
-  for (i in seq_along(strain_chunks)) {
-    this_strains <- strain_chunks[[i]]
-
-    pH_curve <- table.sum |>
-      filter(strain %in% all_strains_to_filter &
-                                 clade != "UND" & !is.na(subclade)) %>%
-      filter(clade == cld, strain %in% this_strains) |> 
-      mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |> 
-      ggplot(aes(x = pH,
-                          color = subclade,
-                          group = subclade,
-                          y = r_mean)) +
-        scale_color_manual(values = subclade_col, guide = "none") +
-        #geom_line() +
-        geom_smooth(aes(fill = subclade), linewidth = 0.5) +
-        scale_fill_manual(values = subclade_col, guide = "none") +
-        geom_point(size = 1) +
-        geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
-        scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
-        ggh4x::facet_nested_wrap(subclade~strain, ncol = 4) +
-        ylim(0, 0.6) +
-        #labs(title = "pH preference for different Curtobacterium Isolates"
-             #,
-             #subtitle = "avg. growth rathe (r) by pH level"
-        #     ) +
-        ylab("Growth rate (r)") +
-        apatheme +
-        theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
-              text = element_text(size = 8),
-              strip.background = element_blank(),
-              #strip.text.x = element_blank(),
-              plot.title = element_text(color = "black", size = 8),
-              plot.subtitle = element_text(color = "black", size = 6),
-              legend.position = "bottom")
-      
-      print(pH_curve)
-      
-      # now save it
-    #fn <- sprintf("plots/pH_curves/pH_curves_%s_page%02d.png", cld, i)
-    #ggsave(
-    #  filename = fn,
-    #  plot     = pH_curve,
-    #  width    = 160,
-    #  height   = 120,
-    #  units    = "mm",
-    #  dpi      = 300
-    #)
-    }
-  }
-
-
-
-#### now let's get a table to map onto the tree which strains have been tested and
-
-all_strains_to_filter <- c(all_strains_to_filter, "04D05", "04G2A08")
-
-
-ok_strains <- all.data |> distinct(strain, .keep_all = T) |> 
-  filter(!strain %in% all_strains_to_filter) |> 
-  mutate(pH_assay_ok = "YES") |>
-  select(strain, pH_assay_ok)
-
-not_ok_strains <- all.data |> distinct(strain, .keep_all = T) |> 
-  filter(strain %in% all_strains_to_filter) |> 
-  mutate(pH_assay_ok = "NO") |>
-  select(strain, pH_assay_ok)
-
-
-pH_ok_strains <- bind_rows(ok_strains, not_ok_strains)
-
-
-write.table(pH_ok_strains,
-            file = here("output/pH/pH_assay_ok_strain_table.txt"),
-            quote = F,
-            row.names = F,
-            col.names = T,
-            sep = "\t")
-
-
-
-## let's pull some of the positive controls for the Magnesium test
-
-control_strains <- 
-  all.data |>
-  filter(strain %in%  c("25G2A02", "26G4B12", "23G4B03", "18G4B09")) |>
-  select(strain, date) |>
-  distinct(.keep_all = T)
-
-all.data |>
-  filter(strain %in%  "23G4B03") |>
-  select(strain, date) |>
-  distinct(.keep_all = T)
-
-```
-
-#### pH curves parameters calculation
-
-Now we can calculate the pH curves parameters for each strain:
-
-  1. Area under the curve
-  2. Range
-  3. Optimal pH
-
-
-```{r calculate curve paramters, message=TRUE, warning=TRUE}
-library(pracma)
-
-head(random_data)
-
-
-random_data$r_mean[random_data$pH %in% c(9.8, 10.1) & random_data$r_mean > 0.0001] <- 0
-random_data$k_mean[random_data$pH %in% c(9.8, 10.1) & random_data$k_mean > 0.0001] <- 0
-
-#write.table(random_data[, c(1:3)], file = "rTPC_test_data.tsv", row.names = FALSE, quote = F, sep = "\t")
-
+```{r helper-calculate-auc, message=FALSE, warning=FALSE}
 # Function to calculate area under the curve for each strain
 calculate_auc <- function(data) {
   if (nrow(data) == 0) {
@@ -1401,19 +78,12 @@ calculate_auc <- function(data) {
                     area_under_curve_r = area_under_curve_r,
                     area_under_curve_k = area_under_curve_k))
 }
+```
 
-# Group by strain and calculate area under the curve for each strain
-result_auc <- random_data %>%
-  group_by(strain) %>%
-  group_split() %>%
-  lapply(calculate_auc) %>%
-  bind_rows()
+**`get_max_rk_mean`** — Fit loess of r and K against pH for a strain and return the maximum predicted r and K with the pH optimum at which each occurs.
 
-# Print the result data frame
-print(result_auc)
-
-
-# Function to calculate max r_mean and its corresponding pH for each strain
+```{r helper-get-max-rk, message=FALSE, warning=FALSE}
+# Function to find each strain's maximum predicted r and K and the pH at which each occurs
 get_max_rk_mean <- function(data) {
   # Fit the loess model
   loess_model_r <- loess(r_mean ~ pH, data = data)
@@ -1423,15 +93,15 @@ get_max_rk_mean <- function(data) {
   predicted_values_r <- predict(loess_model_r, data$pH)
   predicted_values_k <- predict(loess_model_k, data$pH)
   
-  # Find the index of the maximum r_mean value
+  # Find the index of the maximum predicted r and K values
   max_index_r <- which.max(predicted_values_r)
   max_index_k <- which.max(predicted_values_k)
   
-  # Get the corresponding pH value at the maximum r_mean
+  # Get the pH at the maximum r and K
   max_pH_r <- data$pH[max_index_r]
   max_pH_k <- data$pH[max_index_k]
   
-  # Get the maximum r_mean value
+  # Get the maximum r and K values
   max_r_mean <- predicted_values_r[max_index_r]
   max_k_mean <- predicted_values_k[max_index_k]
   
@@ -1442,436 +112,11 @@ get_max_rk_mean <- function(data) {
              opt_pH_k = max_pH_k,
              max_k_mean = max_k_mean)
 }
-
-# Apply the function for each strain in the result_df
-max_rk_mean_results <- random_data %>%
-  group_by(strain) %>%
-  do(get_max_rk_mean(.))
-
-# Print the results
-print(max_rk_mean_results)
-
-
-
-result_range_r <- random_data %>%
-  filter(r_mean != 0) %>%
-  group_by(strain) %>%
-  summarise(min_pH_r = min(pH),
-            max_pH_r = max(pH),
-            breadth_r = max(pH) - min(pH))
-
-print(result_range_r)
-
-result_range_k <- random_data %>%
-  filter(k_mean != 0) %>%
-  group_by(strain) %>%
-  summarise(min_pH_k = min(pH),
-            max_pH_k = max(pH),
-            breadth_k = max(pH) - min(pH))
-
-print(result_range_k)
-
-
-
-curve_params <- merge(result_auc, max_rk_mean_results, by = "strain") %>%
-  merge(., result_range_r, by = "strain") %>%
-  merge(., result_range_k, by = "strain") %>%
-  filter(!strain %in% strains_to_filter)
-
-#write.table(as.data.frame(curve_params$strain), file = "~/SyncFolder/CA_curto/isolates/fastANI_out_WI/working_isolates.tsv", row.names = FALSE, quote = F, sep = "\t")
-
-write.table(as.data.frame(curve_params |>
-                            select(strain) |>
-                            rename(StrainID = strain) |>
-                            mutate(pH = "yes")),
-            file = here("output/pH/pH_strain_table.txt"), row.names = FALSE, quote = F, sep = "\t")
-
-
-### PCA of curve parameters
-curve_params <- curve_params %>% tibble::column_to_rownames("strain")
-
-
-r_traits <- c(colnames(curve_params |> select(ends_with("_r") & !starts_with("area"))))
-k_traits <- c(colnames(curve_params |> select(ends_with("_k") & !starts_with("area"))))
-
-pca <-prcomp(curve_params |>
-               tibble::rownames_to_column("strain") |> 
-               left_join(clade_info, by = "strain") |>
-               filter(!is.na(clade),
-                      clade != "UND",
-                      !is.na(subclade)) |>
-               filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVC")) |>
-               tibble::column_to_rownames("strain") |>
-               select(all_of(r_traits))
-             , scale. = T, center = T)
-
-
-pca.df <- data.frame(pca$x) %>%
-  select(PC1, PC2) %>%
-  merge(., master_md, by.x = "row.names", by.y = "Name", all.x = T)
-
-pca.df$clade_color <- clade_colors$color[match(pca.df$clade, clade_colors$variable)]
-pca.df$subclade_color <- clade_colors$color[match(pca.df$subclade, clade_colors$variable)]
-PCAloads <- data.frame(Variables = rownames(pca$rotation), pca$rotation) |>
-  mutate(Variables = recode(Variables,
-                            "min_pH_r" = "Min. pH",
-                            "opt_pH_r" = "Opt. pH",
-                            "max_pH_r" = "Max. pH",
-                            "max_r_mean" = "Growth rate",
-                            "breadth_r" = "Breadth"))
-
-pca_plot<-ggplot(pca.df
-                 , aes(PC1, PC2)) +
-  geom_point(data = pca.df, aes(color = subclade),  size = 2, alpha = 0.75) +
-  #geom_text(data = pca.df, aes(x=PC1, y=PC2-0.15), label=pca.df$Row.names, size=2.75) +
-  scale_color_manual(values = subclade_col, name="Subclade") +
-  geom_segment(data = PCAloads,
-               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
-               arrow = arrow(length = unit(0.3, "cm")),
-               colour="grey", inherit.aes = FALSE) +
- geom_label(data=PCAloads,
-           aes(x=PC1*2.65, y=PC2*2.65, label=Variables),
-           size=3,
-           colour = "darkblue") +
-  xlab(paste0("PC1 (",round(summary(pca)$importance[2,1] * 100, 2),"%)")) +
-  ylab(paste0("PC2 (",round(summary(pca)$importance[2,2] * 100, 2),"%)")) +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        text = element_text(size = 10),
-        legend.position = "inside",
-        legend.position.inside = c(0.85, 0.8),
-        legend.background = element_rect(fill = alpha("white", 0.3), color = NA),
-        legend.key.size = unit(0.5, "lines"))
-pca_plot
-
-ggsave(
-      filename = "plots/pca_curve_params_r_topSubclades.pdf",
-      plot     = pca_plot,
-      width    = 90,
-      height   = 90,
-      units    = "mm",
-      dpi      = 300,
-      device = cairo_pdf
-    )
-  
-
-summary(pca)
-
-
-pca_k <-prcomp(curve_params |>
-               tibble::rownames_to_column("strain") |> 
-               left_join(clade_info, by = "strain") |>
-               filter(!is.na(clade),
-                      clade != "UND",
-                      !is.na(subclade)) |>
-               filter(subclade %in% c("IC", "IIG", "IIIA",
-                                      #"IIIE",
-                                      "IVB"#, "IVC"
-                                      )) |>
-               tibble::column_to_rownames("strain") |>
-               select(all_of(k_traits))
-             , scale. = T, center = T)
-
-
-pca.df_k <- data.frame(pca_k$x) %>%
-  select(PC1, PC2) %>%
-  merge(., master_md, by.x = "row.names", by.y = "Name", all.x = T)
-
-pca.df_k$clade_color <- clade_colors$color[match(pca.df_k$clade, clade_colors$variable)]
-pca.df_k$subclade_color <- clade_colors$color[match(pca.df_k$subclade, clade_colors$variable)]
-PCAloads_k <- data.frame(Variables = rownames(pca_k$rotation), pca_k$rotation) |>
-  mutate(Variables = recode(Variables,
-                            "min_pH_k" = "Min. pH",
-                            "opt_pH_k" = "Opt. pH",
-                            "max_pH_k" = "Max. pH",
-                            "max_k_mean" = "Yeild",
-                            "breadth_k" = "Breadth"))
-
-pca_plot_k<-ggplot(pca.df_k
-                 , aes(PC1, PC2)) +
-  geom_point(data = pca.df_k, aes(color = subclade),  size = 1.5, alpha = 0.75) +
-  #geom_text(data = pca.df, aes(x=PC1, y=PC2-0.15), label=pca.df$Row.names, size=2.75) +
-  scale_color_manual(values = subclade_col, name="Subclade") +
-  geom_segment(data = PCAloads_k,
-               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
-               colour="grey", inherit.aes = FALSE) +
-   geom_text(data=PCAloads_k,
-           aes(x=PC1*4.5, y=PC2*4.5, label=Variables),
-           size=2,
-           colour = "black",
-           fontface = "bold") +
-  lims(x = c(-4, 4),
-       y = c(-6, 6)) +
-  xlab(paste0("PC1 (",round(summary(pca_k)$importance[2,1] * 100, 2),"%)")) +
-  ylab(paste0("PC2 (",round(summary(pca_k)$importance[2,2] * 100, 2),"%)")) +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        text = element_text(size = 8),
-        legend.position = "none",
-        legend.position.inside = c(0.9, 0.2),
-        legend.background = element_rect(fill = alpha("white", 0), color = NA),
-        legend.key.size = unit(0.5, "lines"),
-        legend.title = element_text(size = 6,
-                                    margin = margin(b = 0, unit = "pt")),
-        legend.text = element_text(size = 5),
-        legend.key.height = unit(0.4, "lines"),
-        legend.key.width = unit(0.7, "lines"),
-        legend.spacing.y = unit(0, "cm"))
-
-pca_plot_k
-
-ggsave(
-      filename = "plots/pca_curve_params_K_topSubclades.pdf",
-      plot     = pca_plot_k,
-      width    = 90,
-      height   = 90,
-      units    = "mm",
-      dpi      = 300,
-      device = cairo_pdf
-    )
-
-
-summary(pca_k)
-
-
-curve_params |>
-               tibble::rownames_to_column("strain") |> 
-               left_join(clade_info, by = "strain") |>
-               filter(!is.na(clade),
-                      clade != "UND",
-                      !is.na(subclade)) |>
-               filter(subclade %in% c("IC", "IIG", "IIIA",
-                                      #"IIIE",
-                                      "IVB"#, "IVC"
-                                      )) |>
-  summarise(avg.pHopt = mean(opt_pH_k, na.rm. = T),
-            avg.minpH = mean(min_pH_k, na.rm. = T),
-            avg.maxpH = mean(max_pH_k, na.rm. = T),
-            avg.breadth = mean(breadth_k, na.rm. = T))
-
-curve_params |>
-               tibble::rownames_to_column("strain") |> 
-               left_join(clade_info, by = "strain") |>
-               filter(!is.na(clade),
-                      clade != "UND",
-                      !is.na(subclade)) |>
-               filter(subclade %in% c("IC", "IIG", "IIIA",
-                                      #"IIIE",
-                                      "IVB"#, "IVC"
-                                      )) |>
-  group_by(subclade) |>
-  summarise(avg.pHopt = mean(opt_pH_k, na.rm. = T),
-            avg.minpH = mean(min_pH_k, na.rm. = T),
-            avg.maxpH = mean(max_pH_k, na.rm. = T),
-            avg.breadth = mean(breadth_k, na.rm. = T))
-
-D <- dist(pca_k$x, "euclidean")
-
-perm <- vegan::adonis2(D ~ subclade, data = pca.df_k, permutations = 999)
-
-perm
-
-
-
 ```
 
+**`dotplot_traits_by_subclade`** — Dot plot of a single curve-parameter (trait) across subclades, with per-strain points, group means, and bootstrap CIs.
 
-#### heat maps of curve parameters
-
-```{r heat maps, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
-head(curve_params)
-library(ggh4x)
-# Add a new column for rownames (Strain IDs)
-curve_params$Strain <- rownames(curve_params)
-
-curve_params <- merge(curve_params, clade_info, by.x = "Strain", by.y = "strain", all.x = T)
-
-# Arrange the data by the clade variable
-curve_params <- curve_params %>%
-  arrange(clade, subclade, Strain) #%>% filter(Strain != "33G1A03")
-
-write.table(as.data.frame(curve_params |>
-                            select(Strain) |>
-                            rename(StrainID = Strain) |>
-                            mutate(pH = "yes")),
-            file = here("output/pH/pH_strain_table.txt"), row.names = FALSE, quote = F, sep = "\t")
-
-
-
-# Assuming your data is stored in a dataframe called curve_params
-# Convert the data to long format
-curve_params_long <- pivot_longer(curve_params,
-                                  cols = where(is.numeric),
-                                  names_to = "Parameter",
-                                  values_to = "Value")
-
-# Scale the data to z-scores by grouping by 'Parameter'
-curve_params_long <- curve_params_long %>%
-  group_by(Parameter) %>%
-  mutate(Value_z = scale(Value)) %>%
-  ungroup()
-
-
-clade_color_vector <- setNames(clade_colors$color, clade_colors$variable)
-
-
-# Create the heatmap
-ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r") & clade != "UND")
-       ,
-       aes(x = Parameter,
-                              y = factor(Strain, levels = unique(Strain)),
-                              fill = Value_z)) +
-  geom_tile() +
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
-                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
-  labs(x = "Parameter", y = "Strain", fill = "Z-score") +
-  ggh4x::facet_grid2(clade ~ ., scales = "free_y", space = "fixed", switch = "y",
-              strip = ggh4x::strip_themed(
-                background_y = ggh4x::elem_list_rect(
-                  fill = clade_color_vector[unique(curve_params_long$clade)]
-                )
-              )) +
-  #scale_x_discrete(position = "top", labels = c("AUC", "Breadth", "max pH", "rmax", "min pH", "Opt. pH")) +
-  scale_x_discrete(position = "top", labels = c("Max. pH", "rmax", "Opt. pH")) +
-  apatheme +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, face = "bold"),  # Align text horizontally and center
-    axis.text.y = element_blank(),  # Remove y-axis text
-    axis.ticks.y = element_blank(),  # Remove y-axis ticks
-    strip.placement = "inside",  # Place facet strips outside the plot area
-    strip.text = element_text(face = "bold"),  # Bold text for facet labels
-    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
-    strip.background = element_blank(),  # Remove the default strip background
-    strip.text.y.left = element_text(angle = 0, vjust = 1, hjust = 1),  # Align facet labels on the left
-    legend.title=element_text(size=11), 
-    legend.text=element_text(size=10),
-    legend.position = "bottom",
-    legend.box = "horizontal",
-    legend.justification = "center",
-    legend.box.spacing = unit(0, "lines"),
-    axis.title.y = element_blank(),
-    axis.title.x = element_blank(),
-    text = element_text(size = 22),
-    panel.grid.major=element_blank(),
-        panel.grid.minor=element_blank(),
-        panel.border=element_blank()# Ensure the y-axis title is removed
-  ) +
-   scale_y_discrete(position = "right") 
-  # Align facet labels on the left
-
-ggsave("plots/heatmap_curve_params.png",
-       width = 6,
-       height = 12,
-       units = "cm",
-       dpi = 600)
-
-# Create the horizontal heatmap
-ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r") & clade != "UND"),
-       aes(x = factor(Strain, levels = unique(Strain)),
-           y = Parameter,
-           fill = Value_z)) +
-  geom_tile() +
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
-                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
-  labs(x = "Strain", y = "Parameter", fill = "Z-score") +
-  ggh4x::facet_grid2(. ~ clade, scales = "free_x", space = "fixed",
-                     strip = ggh4x::strip_themed(
-                       background_x = elem_list_rect(
-                         fill = clade_color_vector[unique(curve_params_long$clade)]
-                       )
-                     )) +
-  scale_y_discrete(labels = c("Max. pH", "rmax", "Opt. pH")) +  # Adjust the y-axis labels
-  theme_minimal() +
-  theme(
-    text = element_text(size = 22),
-    axis.text.y = element_text(angle = 0, hjust = 0.5, size = 14, face = "bold"),  # Align text horizontally and center
-    axis.text.x = element_blank(),  # Remove x-axis text (Strain)
-    axis.ticks.x = element_blank(),  # Remove x-axis ticks (Strain)
-    strip.placement = "inside",  # Place facet strips inside the plot area
-    strip.text = element_text(face = "bold"),  # Bold text for facet labels
-    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
-    strip.background = element_blank(),  # Remove the default strip background
-    strip.text.x.top = element_text(angle = 0, vjust = 1, hjust = 0.5),  # Align facet labels on the top
-    legend.title = element_text(size = 11, margin = margin(b = 0)), 
-    legend.text = element_text(size = 10),
-    legend.position = "right",
-    legend.box = "horizontal",
-    legend.justification = "center",
-    legend.box.spacing = unit(0, "lines"),
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.border = element_blank(),  # Ensure the y-axis title is removed
-    #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
-  )
-
-ggsave("plots/heatmap_curve_params.png",
-       width = 27,
-       height = 4,
-       units = "cm",
-       dpi = 600)
-
-
-# Create the horizontal heatmap subclade level
-ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r") & clade != "UND"),
-       aes(x = factor(Strain, levels = unique(Strain)),
-           y = Parameter,
-           fill = Value_z)) +
-  geom_tile() +
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
-                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
-  labs(x = "Strain", y = "Parameter", fill = "Z-score") +
-  ggh4x::facet_grid2(. ~ subclade, scales = "free_x", space = "fixed",
-                     strip = ggh4x::strip_themed(
-                       background_x = elem_list_rect(
-                         fill = clade_color_vector[unique(curve_params_long$subclade)]
-                       )
-                     )) +
-  scale_y_discrete(labels = c("Max. pH", "rmax", "Opt. pH")) +  # Adjust the y-axis labels
-  theme_minimal() +
-  theme(
-    text = element_text(size = 22),
-    axis.text.y = element_text(angle = 0, hjust = 0.5, size = 14, face = "bold"),  # Align text horizontally and center
-    axis.text.x = element_blank(),  # Remove x-axis text (Strain)
-    axis.ticks.x = element_blank(),  # Remove x-axis ticks (Strain)
-    strip.placement = "inside",  # Place facet strips inside the plot area
-    strip.text = element_text(face = "bold"),  # Bold text for facet labels
-    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
-    strip.background = element_blank(),  # Remove the default strip background
-    strip.text.x.top = element_text(angle = 0, vjust = 1, hjust = 0.5),  # Align facet labels on the top
-    legend.title = element_text(size = 11, margin = margin(b = 0)), 
-    legend.text = element_text(size = 10),
-    legend.position = "right",
-    legend.box = "horizontal",
-    legend.justification = "center",
-    legend.box.spacing = unit(0, "lines"),
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.border = element_blank(),  # Ensure the y-axis title is removed
-    #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
-  )
-
-ggsave("plots/heatmap_curve_params_subclade.png",
-       width = 27,
-       height = 4,
-       units = "cm",
-       dpi = 600)
-
-
-
-write.table(curve_params |> select(-c(clade, subclade)),
-            file = here("output/pH/curve_params.tsv"), row.names = FALSE, quote = F, sep = "\t")
-
-
-
-#### dot plot
-
+```{r helper-dotplot-traits, message=FALSE, warning=FALSE}
 dotplot_traits_by_subclade <- function(
   params_df,     # your d_params_ssfull
   traits,        # character vector of trait names, e.g. c("topt","rmax","ctmax")
@@ -1934,196 +179,11 @@ dotplot_traits_by_subclade <- function(
   
   return(plt)
 }
+```
 
+**`plot_traits_subclade`** — Plot curve-parameter distributions by subclade, running per-trait normality/variance checks plus omnibus and post-hoc tests to annotate significance.
 
-# Plot just two subclades, and save:
-curve_params_dot_plot <- dotplot_traits_by_subclade(
-  params_df  = curve_params_long,
-  traits     = c("opt_pH_r", "max_r_mean", "max_pH_r"),
-  subclades  = NULL,
-  facet_by_clade = T,
-  filename   = "plots/curve_params_dotplot_Subclades.png"
-)
-
-# Plot just two subclades, and save:
-curve_params_dot_plot_k <- dotplot_traits_by_subclade(
-  params_df  = curve_params_long,
-  traits     = c("breadth_k", "opt_pH_k", "max_k_mean", "max_pH_k"),
-  subclades  = NULL,
-  facet_by_clade = T,
-  filename   = "plots/curve_params_dotplot_Subclades_K.png"
-)
-
-
-# Plot just two subclades, and save:
-curve_params_dot_plot_top <- dotplot_traits_by_subclade(
-  params_df  = curve_params_long,
-  traits     = c("opt_pH_r", "max_r_mean", "max_pH_r"),
-  subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
-  facet_by_clade = F,
-  filename   = "plots/curve_params_dotplot_TopSubclades.png"
-)
-
-# Plot just two subclades, and save:
-curve_params_dot_plot_top_k <- dotplot_traits_by_subclade(
-  params_df  = curve_params_long,
-  traits     = c("breadth_k","opt_pH_k", "max_k_mean", "max_pH_k"),
-  subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
-  facet_by_clade = F,
-  filename   = "plots/curve_params_dotplot_TopSubclades_K.png"
-)
-
-
-
-
-posthocs <- curve_params_long %>%
-  # only keep the subclades you care about
-  filter(subclade %in% c("IC","IIG","IIIA","IIIE","IVB","IVE")) %>%
-  group_by(Parameter) %>%
-  do({
-    dat <- .
-
-    # 1) must have ≥2 subclades and each with ≥2 obs
-    sub_counts <- dat %>% count(subclade) 
-    if (n_distinct(dat$subclade) < 2 ||
-        any(sub_counts$n < 2)) {
-      return(tibble()) 
-    }
-
-    # 2) normality?
-    if (nrow(dat) >= 3) {
-      sw_p <- dat |> rstatix::shapiro_test(Value) |> pull(p)
-    } else {
-      sw_p <- NA_real_
-    }
-
-    # 3) homogeneity?
-    lev_p <- rstatix::levene_test(dat, Value ~ subclade)$p
-
-    # 4) choose test
-    if (!is.na(sw_p) && sw_p > 0.05 && lev_p > 0.05) {
-      # ANOVA + Tukey
-      omni <- rstatix::anova_test(dat, Value ~ subclade)
-      ph   <- rstatix::tukey_hsd(dat, Value ~ subclade) %>%
-                mutate(method = "Tukey HSD")
-      test_type <- "ANOVA"
-    } else {
-      # Kruskal–Wallis + Dunn
-      omni <- rstatix::kruskal_test(dat, Value ~ subclade)
-      ph   <- rstatix::dunn_test(dat, Value ~ subclade, p.adjust.method = "BH") %>%
-                mutate(method = "Dunn (BH)")
-      test_type <- "KW"
-    }
-
-    # 5) build omnibus row
-    x_max <- max(dat$Value, na.rm = TRUE)
-    omnibus_df <- tibble(
-      Parameter        = unique(dat$Parameter),
-      group1       = NA_character_,
-      group2       = NA_character_,
-      p.adj        = omni$p,
-      p.adj.signif = as.character(
-                                  symnum(omni$p,
-                                         corr = F,
-                                         cutpoints = c(0, 0.001, 0.01, 0.05, 1),
-                                         symbols   = c("***","**","*","ns"))
-                                  ),
-      x.position   = x_max * 1.08,
-      method       = test_type
-      )
-    
-    # 6) position pairwise rows just below
-    ph_df <- ph %>%
-      mutate(
-        Parameter         = unique(dat$Parameter),
-        p.adj.signif = as.character(
-                          symnum(p.adj,
-                                 corr = F,
-                                 cutpoints = c(0, 0.001, 0.01, 0.05, 1),
-                                 symbols   = c("***","**","*","ns"))
-                        ),
-        x.position = x_max * 1.05)
-
-    bind_rows(omnibus_df, ph_df)
-  }) %>%
-  ungroup()
-
-# Inspect your posthocs table
-posthocs
-
-# 2. Compute max per panel so we can place omnibus labels
-panel_ranges <- curve_params_long %>%
-  filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r")) |>
-  group_by(Parameter) %>%
-  summarise(xmax = max(Value, na.rm=TRUE), .groups="drop") %>%
-  mutate(xpos = xmax * 1.02)     # 2% beyond the data
-
-# 4. Join in the xpos
-posthocs <- posthocs %>%
-  left_join(panel_ranges, by = "Parameter")
-
-
-# 1) Pull out just your omnibus rows
-posthocs_omni <- posthocs %>%
-  filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r"),) |>
-  filter(is.na(group1))
-
-
-# 2) For each term, build a named vector of p’s and feed to multcompLetters
-letter_df <- posthocs %>%
-  filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r"),) |>
-  filter(!is.na(group1)) %>% 
-  select(Parameter, group1, group2, p.adj) |> 
-  group_by(Parameter) %>%
-  summarise(
-    # build a named vector c("A-B"=p1, "A-C"=p2, ...)
-    pv = list( setNames(p.adj, paste(group1, group2, sep = "-")) ),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    # run multcompLetters on each vector
-    letters = map(pv, ~ multcompView::multcompLetters(.x, threshold = 0.05)$Letters)
-  ) %>%
-  select(-pv) %>%
-  unnest_longer(letters, indices_to = "subclade", values_to = "letter") |>
-  left_join(panel_ranges, by = "Parameter")
-
-
-# 2) Add the text directly
-curve_params_dot_plot_top +
-  geom_text(
-    data        = posthocs_omni,
-    aes(x        = x.position * 0.85,
-        y        = 0.65,
-        label    = p.adj.signif),
-    inherit.aes = FALSE,
-    size = 6,
-    hjust = 0      # left‐justify so it sits just outside
-  ) +
-  geom_text(
-    data        = letter_df,
-    aes(x     = xpos * 0.1,
-        y     = subclade,
-        label = letter),
-    inherit.aes = FALSE,
-    size        = 5,
-    hjust       = 0
-  )
-
-
-ggsave(
-      filename = "plots/curve_params_dotplot_TopSubclades.png",
-      width    = 180,
-      height   = 100,
-      units    = "mm",
-      dpi      = 300
-    )
-
-
-
-
-
-
+```{r helper-plot-traits-subclade, message=FALSE, warning=FALSE}
 plot_traits_subclade <- function(
   params_df,
   clade_info = NULL,          # <-- make optional
@@ -2424,9 +484,1836 @@ letter_df <- posthocs %>%
     omnibus_one = posthocs_omni_one
   ))
 }
+```
 
-# helper for a safe default (returns b if a is NULL)
-`%||%` <- function(a, b) if (is.null(a)) b else a
+
+```{r set working directory and load and merge, message=FALSE, warning=FALSE, results='hold', echo=FALSE}
+# Working directory is handled by here(); GC_values inputs live in data/pH
+files_df <- tibble(
+  path = list.files(path = here("data/pH"), pattern = "^GC_values_pHassay\\..*\\.txt$", full.names = TRUE)
+) %>%
+  mutate(
+    file = basename(path),
+    # Extract YYYY-MM-DD that appears at the end segment before .txt
+    date_str  = str_extract(file, "(?:19|20)\\d{2}-\\d{2}-\\d{2}"),
+    file_date = ymd(date_str),
+    year      = year(file_date),
+    is_2025   = (year == 2025),
+    # Extract rep number if present (rep1/rep2/rep3)
+    rep_str   = str_extract(file, "rep\\d+"),
+    plate     = if_else(is.na(rep_str), NA_character_,
+                        paste0("P", str_extract(rep_str, "\\d+")))
+  )
+
+
+# Read all files; keep filename-derived columns alongside the data
+all.data <- files_df %>%
+  mutate(dat = map(path, ~ readr::read_tsv(.x, show_col_types = FALSE))) %>%
+  select(file, file_date, year, is_2025, plate, dat) %>%
+  unnest(dat) |>
+  mutate(date = case_when(file_date == "2024-05-13" ~ file_date,
+                          file_date == "2024-04-30" ~ file_date,
+                          TRUE ~ date),
+          date = ymd(date)) |>
+  mutate(strain = case_when(strain == "Desert-08" ~ "Desert-8",
+                            TRUE ~ strain))
+
+
+
+# Quick sanity checks:
+# 1) Which files were tagged 2025 and their plate labels?
+all.data %>% distinct(file, is_2025, plate) %>% arrange(file) %>% print(n=50)
+
+# 2) If a 'date' column exists in your data files, verify it matches file_date
+if ("date" %in% names(all.data)) {
+  all.data <- all.data %>% mutate(date = ymd(date))
+  mism <- all.data %>% filter(!is.na(date), !is.na(file_date), date != file_date)
+  if (nrow(mism) > 0) {
+    message("Warning: some rows have date mismatch between file content and filename.")
+    print(mism %>% select(file, date, file_date) %>% distinct())
+  }
+}
+
+
+
+```
+
+
+### Number of assays and ANOVAS for each pH level and strain across date of the assay
+
+```{r number of assays summary and ANOVAS, message=FALSE, warning=FALSE, echo=FALSE, fig.height=18, fig.width=12}
+
+## Let's get the metadata info for each strain. For that we need to read in the master metadata table.
+master_md <- read.table(here("data/shared/master_md_all_sequenced_Isolates_with_extendedMD.txt"), header = T, sep = "\t")
+
+master_md <- master_md %>% select(genomeID, Name, clade, subclade)
+
+
+clade_info <- merge(all.data, master_md, by.x = "strain", by.y = "Name", all.x = T) %>% select(strain, clade, subclade) %>% distinct()
+
+all.data <-merge(all.data, clade_info, by = "strain", all.x = T)
+
+
+all.data$strain.date<-c(paste(all.data$strain, all.data$date, sep = "."))
+all.data$strain.rep<-c(paste(all.data$strain, all.data$replicate, sep = "."))
+all.data$strain.date.rep<-c(paste(all.data$strain, all.data$date, all.data$replicate, sep = "."))
+
+
+
+all.data$date <- as.Date(all.data$date)
+
+#now let's match the clade colors to the metadata
+clade_colors <- read.table(here("data/shared/clade_colors.txt"), header = T, sep = "\t", comment.char = "")
+all.data$clade_color <- clade_colors$color[match(all.data$clade, clade_colors$variable)]
+all.data$subclade_color <- clade_colors$color[match(all.data$subclade, clade_colors$variable)]
+
+subclade_colors_vec <- clade_colors |>
+  tibble::deframe()
+
+
+all.data_25 <- all.data %>%
+  filter(!is.na(replicate)) %>%
+  filter(year(date) == 2025)
+
+
+
+# Assumes all.data has: strain, date, plate, (optionally replicate/well-level)
+# 1) Count replication structure per strain
+rep_summary <- all.data %>%
+  mutate(date = as.Date(date)) %>%
+  group_by(strain) %>%
+  summarise(
+    n_dates  = n_distinct(date, na.rm = TRUE),
+    # count unique plate runs; if older data lack `plate`, treat each date as one plate
+    n_plates = n_distinct(ifelse(is.na(plate),
+                                 paste0("date:", date),        # fallback: 1 plate per date
+                                 paste0(date, "::", plate) ),  # plate identities within date
+                           na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    replication_type = case_when(
+      n_dates >= 2 ~ "multi-date",
+      n_dates == 1 & n_plates >= 2 ~ "single-date_multi-plate",
+      TRUE ~ "single-date_single-plate"
+    ),
+    keep = (n_dates >= 2) | (n_dates == 1 & n_plates >= 2)
+  )
+
+# 2) Join clade info and keep strains per rule
+rep_keep <- rep_summary %>%
+  left_join(clade_info, by = "strain") %>%
+  filter(keep)
+
+rep_keep |>
+  group_by(clade) |>
+  count() |>
+  print(n = 21)
+
+rep_keep |>
+  group_by(clade, subclade) |>
+  count() |>
+  print(n = 21)
+
+
+
+
+
+# rep_keep now has the strains you’ll include
+# If you still want a dataframe at the row level filtered to these strains:
+all_kept <- all.data %>%
+  semi_join(rep_keep %>% select(strain), by = "strain")
+
+
+all.data <- all.data %>% filter(strain.date != "35G2A07.2023-07-19") |> filter(r < 2)
+
+
+
+all_kept <- all.data %>%
+  semi_join(rep_keep %>% select(strain), by = "strain")
+
+
+data_cleaned <- all.data %>%
+  filter(!is.na(replicate)) %>%            # your original filter
+  select(strain, pH, date, plate, r, k) %>%
+  drop_na(strain, pH, r) %>%
+  mutate(
+    date  = as.Date(date),                 # keep as Date
+    plate = as.factor(plate)
+  )
+
+
+
+# run the appropriate ANOVA per (strain, pH)
+anova_results <- data_cleaned %>%
+  group_by(strain, pH) %>%
+  group_modify(function(.x, .key) {
+    nd <- n_distinct(.x$date)
+    np <- n_distinct(.x$plate)
+
+    if (nd >= 2) {
+      fit <- aov(r ~ date, data = .x)
+      broom::tidy(fit) %>%
+        filter(term == "date") %>%
+        mutate(test_factor = "date",
+               n_dates = nd, n_plates = np)
+    } else if (nd == 1 && np >= 2) {
+      fit <- aov(r ~ plate, data = .x)
+      broom::tidy(fit) %>%
+        filter(term == "plate") %>%
+        mutate(test_factor = "plate",
+               n_dates = nd, n_plates = np)
+    } else {
+      tibble(
+        term = "none", df = NA_real_, sumsq = NA_real_, meansq = NA_real_,
+        statistic = NA_real_, p.value = NA_real_,
+        test_factor = "insufficient",
+        n_dates = nd, n_plates = np
+      )
+    }
+  }) %>%
+  ungroup()
+
+# BH correction within strain (optional but recommended)
+anova_results <- anova_results %>%
+  group_by(strain) %>%
+  mutate(p_adj = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+
+
+# join clade metadata
+final.table <- anova_results %>%
+  left_join(clade_info, by = "strain")
+
+# ---- robust color vectors (avoid duplicates from row-level all.data) ----
+## create strings to color by:
+## clade:
+clade_col <- as.character(all.data$clade_color)
+names(clade_col) <- as.character(all.data$clade)
+# strain by clade color
+strain_clade_col <- as.character(all.data$clade_color)
+names(strain_clade_col) <- as.character(all.data$strain)
+
+## subclade:
+subclade_col <- as.character(all.data$subclade_color)
+names(subclade_col) <- as.character(all.data$subclade)
+# strain by clade color
+strain_subclade_col <- as.character(all.data$subclade_color)
+names(strain_subclade_col) <- as.character(all.data$strain)
+
+clade_color_vector <- setNames(clade_colors$color, clade_colors$variable)
+
+
+# ---- plot: show which factor was tested ----
+
+ggplot(
+  final.table %>% filter(test_factor != "insufficient"),
+  aes(x = pH, y = p.value, color = clade, shape = test_factor)
+) +
+  geom_point(size = 2.8, alpha = 0.9) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  scale_color_manual(values = clade_col) +
+  scale_shape_manual(values = c(date = 16, plate = 17)) +  # circle vs triangle
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  labs(
+    title = "ANOVA p-values testing within-group variation of r",
+    subtitle = "If ≥2 dates → test by date; else if 1 date & ≥2 plates → test by plate",
+    y = "p value"
+  ) +
+  facet_wrap(strain ~ .) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+
+data_cleaned <- all.data %>% filter(!is.na(replicate)) %>% 
+  select(strain, pH, date, r, k) %>%
+  drop_na() %>%
+  mutate(date = as.factor(date))
+
+data_filtered <- data_cleaned %>%
+  group_by(strain, pH) %>%
+  filter(n_distinct(date) > 1) %>%
+  ungroup()
+
+anova_results <- data_filtered %>%
+  group_by(strain, pH) %>%
+  nest() %>%
+  mutate(aov_result = map(data, ~aov(r ~ date, data = .)),
+         anova_summary = map(aov_result, tidy)) %>%
+  ungroup()
+
+
+final.table <- anova_results %>%
+  select(strain, pH, anova_summary) %>%
+  mutate(anova_summary = map(anova_summary, ~filter(.x, term == "date"))) %>%
+  unnest(anova_summary)
+
+final.table <- merge(final.table, clade_info, by = "strain", all.x = T)
+
+write.csv(final.table, file = "anova_pH_results.csv", row.names = FALSE)
+
+## create strings to color by:
+## clade:
+clade_col <- as.character(all.data$clade_color)
+names(clade_col) <- as.character(all.data$clade)
+# strain by clade color
+strain_clade_col <- as.character(all.data$clade_color)
+names(strain_clade_col) <- as.character(all.data$strain)
+
+## subclade:
+subclade_col <- as.character(all.data$subclade_color)
+names(subclade_col) <- as.character(all.data$subclade)
+# strain by clade color
+strain_subclade_col <- as.character(all.data$subclade_color)
+names(strain_subclade_col) <- as.character(all.data$strain)
+
+
+
+ggplot(final.table,
+       aes(x = pH,
+                    color = clade,
+                    group = clade,
+                    y = p.value)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0.05, color = "red", linetype = "dashed") +
+  scale_color_manual(values = clade_col) +
+  #ggbreak::scale_y_cut(c(0.01), which = c(2), scales = c(1, 3)) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.3)) +
+  #ylim(0, 0.5) +
+  labs(title = "p Values for ANOVA results testing the effect of date (of the assay) on the growth rate for each pH and strain") +
+  ylab("p value") +
+  facet_wrap(strain~.) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  
+
+```
+
+### pH preference curves for r, K and AUC
+
+Mean growth rate  (r) carrying capacity (K) and Area Under the Curve (AUC), and  S.D. for each parameter, for each combination of strain and pH level.
+
+```{r summarized pH curve, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
+table.sum<-all.data %>%
+  filter(!is.na(replicate)) %>%
+  dplyr::group_by(strain, pH) %>%
+  dplyr::summarize(r_mean = mean(r),
+                   r_sd = sd(r),
+                   k_mean = mean(k),
+                   k_sd = sd(k),
+                   auc_e_mean = mean(auc_e),
+                   auc_e_sd = sd(auc_e)) %>%
+  merge(., clade_info, by = "strain", all.x = T)
+
+
+table.sum.date<-all.data %>%
+  filter(!is.na(replicate)) %>%
+  dplyr::group_by(strain, pH, date) %>%
+  dplyr::summarize(r_mean = mean(r),
+                   r_sd = sd(r),
+                   k_mean = mean(k),
+                   k_sd = sd(k),
+                   auc_e_mean = mean(auc_e),
+                   auc_e_sd = sd(auc_e)) %>%
+  merge(., clade_info, by = "strain", all.x = T)
+
+
+# make a stable id you can join on
+all.data <- all.data %>%
+  mutate(id_sdp = paste(strain, date, plate, sep = "|"))
+
+
+random_ids <- all.data %>%
+  filter(!is.na(replicate)) %>%
+  group_by(strain, date, plate) %>%
+  dplyr::sample_n(1) %>%       # dplyr >=1.1: use slice_sample not sample_n
+  ungroup() %>%
+  pull(id_sdp)
+
+
+random_data <- all.data %>%
+  filter(id_sdp %in% random_ids) %>%
+  group_by(strain, pH) %>%
+  summarise(
+    r_mean     = mean(r, na.rm = TRUE),
+    r_sd       = sd(r, na.rm = TRUE),
+    k_mean     = mean(k, na.rm = TRUE),
+    k_sd       = sd(k, na.rm = TRUE),
+    auc_e_mean = mean(auc_e, na.rm = TRUE),
+    auc_e_sd   = sd(auc_e, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  merge(clade_info, by = "strain", all.x = TRUE) %>%
+  filter(!strain %in% c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
+
+
+## pH preference curve values averaged by date of the assay for each pH vale and strain
+
+pH_curve_all_mean_by_date<-ggplot(table.sum.date |> mutate(date = as.factor(date))
+                 ,
+                 aes(x = pH,
+                    color = subclade,
+                    group = subclade,
+                    y = r_mean,
+                    shape = date)) +
+  scale_color_manual(values = subclade_col) +
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  facet_wrap(clade~strain) +
+  ylim(0, 0.6) +
+  labs(title = "pH preference curve for growth rate (r)",
+       subtitle = "avg. r by pH level and date") +
+  ylab("Growth rate (r)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "bottom")
+
+print(pH_curve_all_mean_by_date)
+
+
+pH_curve_all<-ggplot(all.data %>% filter(!is.na(replicate)) |> mutate(date = as.factor(date))
+                 ,
+                 aes(x = pH,
+                    color = subclade,
+                    group = subclade,
+                    y = r
+                    , shape = date
+                    )) +
+  scale_color_manual(values = subclade_col) +
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col) +
+  geom_point(size = 2) +
+  scale_shape_manual(values = c(0:30)) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  facet_wrap(clade~strain) +
+  ylim(0, 0.6) +
+  labs(title = "pH preference curve for growth rate (r)",
+       subtitle = "all values") +
+  ylab("Growth rate (r)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "bottom")
+
+print(pH_curve_all)
+
+
+strains_to_filter <- c("25G4A05", "18G3A05", "23G3B04", "04G1A01", "24G2B02", "35D04", "35G4A01", "18G4B09", "24G4A05", "25G4B06", "28G1A08", "41G3A07", "18G1A07", "23G1B10", "24G2B09", "28G4A05", "28G4B01")
+
+bad_strains <- table.sum %>%
+  group_by(strain) %>%
+  summarise(
+    n_total = n(),
+    n_zero  = sum(r_mean == 0, na.rm = TRUE),
+    frac_zero = n_zero / n_total
+  ) %>%
+  filter(frac_zero >= 0.9)
+
+strains_to_filter <- unique(c(strains_to_filter, bad_strains$strain))
+
+
+for (cld in c("I", "II","III", "IV")) {
+  
+   # get all strains in this subclade
+  all_strains <- table.sum %>%
+    filter(!strain %in% strains_to_filter &
+             clade != "UND" &
+             !is.na(subclade)) %>%
+    filter(clade == cld) %>%
+    arrange(subclade) |> 
+    pull(strain) %>%
+    unique()
+  
+   # split into chunks of up to 16
+  strain_chunks <- split(all_strains, 
+                         ceiling(seq_along(all_strains) / 16))
+  
+  # loop over each chunk (page)
+  for (i in seq_along(strain_chunks)) {
+    this_strains <- strain_chunks[[i]]
+
+    pH_curve <- table.sum |>
+      filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+      filter(clade == cld, strain %in% this_strains) |> 
+      mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |> 
+      ggplot(aes(x = pH,
+                          color = subclade,
+                          group = subclade,
+                          y = r_mean)) +
+        scale_color_manual(values = subclade_col, guide = "none") +
+        geom_smooth(aes(fill = subclade), linewidth = 0.5) +
+        scale_fill_manual(values = subclade_col, guide = "none") +
+        geom_point(size = 1) +
+        geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
+        scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+        ggh4x::facet_nested_wrap(subclade~strain, ncol = 4) +
+        ylim(0, 0.6) +
+        ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+        apatheme +
+        theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+              text = element_text(size = 8),
+              strip.background = element_blank(),
+              #strip.text.x = element_blank(),
+              plot.title = element_text(color = "black", size = 8),
+              plot.subtitle = element_text(color = "black", size = 6),
+              legend.position = "bottom")
+      
+      print(pH_curve)
+      
+      # now save it
+    fn <- sprintf("plots/pH_curves/pH_curves_%s_page%02d.png", cld, i)
+    ggsave(
+      filename = fn,
+      plot     = pH_curve,
+      width    = 160,
+      height   = 120,
+      units    = "mm",
+      dpi      = 300
+    )
+    }
+  }
+  
+  
+  
+  
+   pH_curve_rndm_clades<-ggplot(random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+  mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean))
+                 ,
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = r_mean)) +
+  scale_color_manual(values = strain_clade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.85, alpha = 0.65) +
+  scale_fill_manual(values = strain_clade_col) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  facet_grid(~clade, space = "free") +
+  ylim(0, 0.6) +
+  ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 20),
+        strip.background.x = element_blank(),
+        text = element_text(size = 35),
+        plot.title = element_text(color = "black", size = 18),
+        plot.subtitle = element_text(color = "black", size = 16),
+        legend.position = "none")
+
+print(pH_curve_rndm_clades)
+
+ggsave("plots/pH_curve_1rp_by_date_clades.png",
+       width = 30,
+       height = 10,
+       units = "cm",
+       dpi = 600)
+
+
+
+clade_cols <- c(
+  "I"   = "#7171FF",
+  "II"  = "#EEC900",
+  "III" = "#FF0000",
+  "IV"  = "#DC89FF"
+)
+
+
+
+pH_curve_rndm_subclades<-ggplot(random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+  mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean))
+                 ,
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = r_mean)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.85, alpha = 0.65) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  # here’s the magic:
+  ggh4x::facet_nested( ~clade + subclade,
+    nest_line = element_line(linetype = 2),
+    drop       = TRUE, # <— ensure unused combos get dropped
+    strip     = ggh4x::strip_nested(
+      # background for the top-level (clade) and second-level (subclade) strips
+      background_x = ggh4x::elem_list_rect(
+        fill = c(clade_cols, rep("white", 14)),  # one rect per clade level
+        by_layer_x = F)
+    )
+  ) +
+  ylim(0, 0.6) +
+  ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 20),
+        strip.background.x = element_blank(),
+        text = element_text(size = 35),
+        plot.title = element_text(color = "black", size = 18),
+        plot.subtitle = element_text(color = "black", size = 16),
+        legend.position = "none")
+
+print(pH_curve_rndm_subclades)
+
+ggsave("plots/pH_curve_1rp_by_date_subclades.png",
+       width = 60,
+       height = 10,
+       units = "cm",
+       dpi = 600)
+
+
+pH_curve_rndm_TopSubclades <- random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade) &
+                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
+  mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |> 
+  ggplot(
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = r_mean)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.85, alpha = 0.65) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  # here’s the magic:
+  ggh4x::facet_nested( ~subclade) +
+  ylim(0, 0.6) +
+  ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 16),
+        strip.background.x = element_blank(),
+        text = element_text(size = 14),
+        plot.title = element_text(color = "black", size = 18),
+        plot.subtitle = element_text(color = "black", size = 16),
+        legend.position = "none") 
+
+print(pH_curve_rndm_TopSubclades)
+
+ggsave("plots/pH_curve_1rp_by_date_TopSubclades.png",
+       width = 30,
+       height = 7.5,
+       units = "cm",
+       dpi = 600)
+
+random_avg <- random_data |>
+  group_by(subclade, pH) |>
+  summarise(avg_r = mean(r_mean)) |>
+  mutate(avg_r = if_else(pH %in% c(9.8, 10.1) & avg_r > 0.00001, 0, avg_r))
+
+
+
+pH_curve_avg_subclades <- random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade) &
+                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
+   mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |>
+   ggplot(aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = r_mean)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.1, alpha = 0.25) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = c(3.2, 6.6, 10.1)) +
+      # 2) tell ggplot we want a *new* colour scale
+      ggnewscale::new_scale_color() +
+      geom_smooth(data = random_avg |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                 aes(pH, avg_r, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = T) +
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_colors_vec) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_colors_vec) +
+      ylim(0, 0.6) +
+      facet_wrap(.~ subclade, nrow = 1) +
+      ylab(expression(paste("Growth rate (", h^{-1}, ")"))) +
+      xlab("pH") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 4.5),
+            axis.text.y = element_text(size = 6),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            #strip.text.x = element_blank(),
+            plot.title = element_text(color = "black", size = 18),
+            plot.subtitle = element_text(color = "black", size = 16),
+            legend.position = "none",
+    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
+                                        colour = NA),
+    legend.title         = element_text(size = 5),
+    legend.text          = element_text(size = 4),
+    legend.margin        = margin(rep(1,4)))
+print(pH_curve_avg_subclades)
+
+```
+
+### pH curves for K
+
+```{r pH curves for K, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
+
+
+pH_curve_k<-ggplot(table.sum,
+                 aes(x = pH,
+                    color = subclade,
+                    group = subclade,
+                    y = k_mean)) +
+  scale_color_manual(values = subclade_col) +
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = k_mean-k_sd, ymax = k_mean+k_sd), width = .2) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  facet_wrap(strain~.) +
+  ylim(0, 0.6) +
+  labs(title = "pH preference curve for carrying capacity (K)",
+       subtitle = "avg. K by pH level") +
+  ylab("Carrying capacity (K)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "bottom")
+
+print(pH_curve_k)
+
+
+for (cld in c("I", "II","III", "IV")) {
+  
+   # get all strains in this subclade
+  all_strains <- table.sum %>%
+    filter(!strain %in% strains_to_filter &
+             clade != "UND" &
+             !is.na(subclade)) %>%
+    filter(clade == cld) %>%
+    arrange(subclade) |> 
+    pull(strain) %>%
+    unique()
+  
+   # split into chunks of up to 16
+  strain_chunks <- split(all_strains, 
+                         ceiling(seq_along(all_strains) / 16))
+  
+  # loop over each chunk (page)
+  for (i in seq_along(strain_chunks)) {
+    this_strains <- strain_chunks[[i]]
+
+    pH_curve <- table.sum |>
+      filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+      filter(clade == cld, strain %in% this_strains) |> 
+      mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean)) |> 
+      ggplot(aes(x = pH,
+                          color = subclade,
+                          group = subclade,
+                          y = k_mean)) +
+        scale_color_manual(values = subclade_col, guide = "none") +
+        geom_smooth(aes(fill = subclade), linewidth = 0.5) +
+        scale_fill_manual(values = subclade_col, guide = "none") +
+        geom_point(size = 1) +
+        geom_errorbar(aes(ymin = k_mean-k_sd, ymax = k_mean+k_sd), width = .2) +
+        scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+        ggh4x::facet_nested_wrap(subclade~strain, ncol = 4) +
+        ylim(0, 0.6) +
+        labs(y = expression("Yield (OD" [600] * ")")) +
+        apatheme +
+        theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+              text = element_text(size = 8),
+              strip.background = element_blank(),
+              #strip.text.x = element_blank(),
+              plot.title = element_text(color = "black", size = 8),
+              plot.subtitle = element_text(color = "black", size = 6),
+              legend.position = "bottom")
+      
+      print(pH_curve)
+      
+      # now save it
+    fn <- sprintf("plots/pH_curves/pH_curves_K_%s_page%02d.png", cld, i)
+    ggsave(
+      filename = fn,
+      plot     = pH_curve,
+      width    = 160,
+      height   = 120,
+      units    = "mm",
+      dpi      = 300
+    )
+    }
+  }
+  
+  
+  
+  
+   pH_curve_rndm_clades_K<-ggplot(random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+  mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean))
+                 ,
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = k_mean)) +
+  scale_color_manual(values = strain_clade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.85, alpha = 0.65) +
+  scale_fill_manual(values = strain_clade_col) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  facet_grid(~clade, space = "free") +
+  ylim(0, 0.6) +
+  labs(y = expression("Yield (OD" [600] * ")")) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 20),
+        strip.background.x = element_blank(),
+        text = element_text(size = 35),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 18),
+        plot.subtitle = element_text(color = "black", size = 16),
+        legend.position = "none")
+
+print(pH_curve_rndm_clades_K)
+
+ggsave("plots/pH_curve_1rp_by_date_clades_K.png",
+       width = 30,
+       height = 10,
+       units = "cm",
+       dpi = 600)
+
+
+
+clade_cols <- c(
+  "I"   = "#7171FF",
+  "II"  = "#EEC900",
+  "III" = "#FF0000",
+  "IV"  = "#DC89FF"
+)
+
+
+
+pH_curve_rndm_subclades_K<-ggplot(random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+  mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean))
+                 ,
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = k_mean)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.85, alpha = 0.65) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  # here’s the magic:
+  ggh4x::facet_nested( ~clade + subclade,
+    nest_line = element_line(linetype = 2),
+    drop       = TRUE, # <— ensure unused combos get dropped
+    strip     = ggh4x::strip_nested(
+      # background for the top-level (clade) and second-level (subclade) strips
+      background_x = ggh4x::elem_list_rect(
+        fill = c(clade_cols, rep("white", 14)),  # one rect per clade level
+        by_layer_x = F)
+    )
+  ) +
+  ylim(0, 0.6) +
+  labs(y = expression("Yield (OD" [600] * ")")) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 20),
+        strip.background.x = element_blank(),
+        text = element_text(size = 35),
+        plot.title = element_text(color = "black", size = 18),
+        plot.subtitle = element_text(color = "black", size = 16),
+        legend.position = "none")
+
+print(pH_curve_rndm_subclades_K)
+
+ggsave("plots/pH_curve_1rp_by_date_subclades_K.png",
+       width = 60,
+       height = 10,
+       units = "cm",
+       dpi = 600)
+
+
+pH_curve_rndm_TopSubclades_K <- random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade) &
+                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
+  mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean)) |> 
+  ggplot(
+                 aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = k_mean)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.85, alpha = 0.65) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  # here’s the magic:
+  ggh4x::facet_nested( ~subclade) +
+  ylim(0, 0.6) +
+  labs(y = expression("Yield (OD" [600] * ")")) +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 16),
+        strip.background.x = element_blank(),
+        text = element_text(size = 14),
+        #strip.text.x = element_blank(),
+        plot.title = element_text(color = "black", size = 18),
+        plot.subtitle = element_text(color = "black", size = 16),
+        legend.position = "none") 
+
+print(pH_curve_rndm_TopSubclades_K)
+
+ggsave("plots/pH_curve_1rp_by_date_TopSubclades_K.png",
+       width = 30,
+       height = 7.5,
+       units = "cm",
+       dpi = 600)
+
+random_avg_k <- random_data |>
+  group_by(subclade, pH) |>
+  summarise(avg_k = mean(k_mean)) |>
+  mutate(avg_k = if_else(pH %in% c(9.8, 10.1) & avg_k > 0.00001, 0, avg_k))
+
+
+```
+
+##### Figures included in the publication
+###### Single pH curves per subclades and avg. curve for top subclades
+
+The per-subclade average-yield (K) curves below (`pH_curve_avg_subclades_K`, `pH_curve_avgOnly_subclades_K`) are included in the publication.
+
+- Main figure from this: `pH_curve_avgOnly_subclades_K`
+
+```{r figs-not-in-pub-K-curves, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
+pH_curve_avg_subclades_K <- random_data %>%
+                        filter(!strain %in% strains_to_filter &
+                                 clade != "UND" & !is.na(subclade) &
+                                 subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")) %>%
+   mutate(k_mean = if_else(pH %in% c(9.8, 10.1) & k_mean > 0.00001, 0, k_mean)) |>
+   ggplot(aes(x = pH,
+                    color = strain,
+                    group = strain,
+                    y = k_mean)) +
+  scale_color_manual(values = strain_subclade_col) +
+  geom_smooth(aes(fill = strain),
+              se = F, linewidth = 0.1, alpha = 0.25) +
+  scale_fill_manual(values = strain_subclade_col) +
+  scale_x_continuous(breaks = #seq(3.2, 10.1, 0.6)
+                       c(3.2, 6.6, 10.1)) +
+      # 2) tell ggplot we want a *new* colour scale
+      ggnewscale::new_scale_color() +
+      geom_smooth(data = random_avg_k |> filter(subclade  %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE")),
+                 aes(pH, avg_k, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = T) +
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_colors_vec) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_colors_vec) +
+      ylim(0, 0.4) +
+      facet_wrap(.~ subclade, nrow = 1) +
+      labs(y = expression("Yield (OD" [600] * ")")) +
+      xlab("pH") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5, size = 4.5),
+            axis.text.y = element_text(size = 6),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            plot.title = element_text(color = "black", size = 18),
+            plot.subtitle = element_text(color = "black", size = 16),
+            legend.position = "none",
+    legend.background    = element_rect(fill = scales::alpha("white", 0.6),
+                                        colour = NA),
+    legend.title         = element_text(size = 5),
+    legend.text          = element_text(size = 4),
+    legend.margin        = margin(rep(1,4)))
+print(pH_curve_avg_subclades_K)
+
+
+pH_curve_avgOnly_subclades_K <- random_avg_k |>
+  filter(subclade  %in% c("IC", "IIG", "IIIA", "IVB")) |>
+   ggplot() +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+      geom_smooth(
+                 aes(pH, avg_k, color = subclade, fill = subclade), alpha = 0.35,
+                 method = "gam",
+                 inherit.aes = F,
+                linewidth = 0.75,
+                se = F,
+                key_glyph = "rect") +
+      scale_colour_manual(name   = "Subclade",
+                          values = subclade_colors_vec) +
+      scale_fill_manual(name   = "Subclade",
+                              values = subclade_colors_vec) +
+          # change legend keys from line to square
+      guides(
+        colour = guide_legend(
+          override.aes = list(
+            shape = 22,   # 22 = filled square (uses both color & fill)
+            size  = 1,
+            linetype = 2,  # remove line segment in legend
+            fill = clade_color_vector[names(clade_color_vector)  %in% c("IC", "IIG", "IIIA", "IVB")],
+            alpha = 0.95
+          )
+        ),
+        fill = "none"     # hide separate fill legend, keep just one
+      ) +
+      ylim(0, 0.5) +
+      labs(y = expression("Yield (OD" [600] * ")")) +
+      xlab("pH") +
+      apatheme +
+      theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 6),
+            axis.text.y = element_text(size = 6),
+            strip.background = element_blank(),
+            text = element_text(size = 8),
+            legend.position = "inside",
+            legend.position.inside = c(0.8, 0.85),
+            legend.background = element_rect(fill = alpha("white", 0), color = NA),
+            legend.key = element_rect(fill = NA),
+            legend.key.size = unit(0.3, "lines"),
+            legend.title = element_text(size = 11,
+                                        margin = margin(b = 0, unit = "pt")),
+            legend.text = element_text(size = 10),
+            legend.key.height = unit(0.4, "lines"),
+            legend.key.width = unit(0.7, "lines"),
+            legend.spacing.y = unit(0, "cm"))
+print(pH_curve_avgOnly_subclades_K)
+```
+
+```{r pH-curves-for-K-cont, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
+
+
+
+pH_curve_auc<-ggplot(table.sum,
+                 aes(x = pH,
+                    color = subclade,
+                    group = subclade,
+                    y = auc_e_mean)) +
+  scale_color_manual(values = subclade_col) +
+  geom_smooth(aes(fill = subclade)) +
+  scale_fill_manual(values = subclade_col) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = auc_e_mean-auc_e_sd, ymax = auc_e_mean+auc_e_sd), width = .2) +
+  scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+  facet_wrap(strain~.) +
+  #ylim(0, 0.6) +
+  labs(title = "pH preference curve for Area Under the Curve (AUC)",
+       subtitle = "avg.AUC by pH level") +
+  ylab("Area under the curve (AUC)") +
+  apatheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+        plot.title = element_text(color = "black", size = 12),
+        plot.subtitle = element_text(color = "black", size = 10),
+        legend.position = "bottom")
+
+print(pH_curve_auc)
+
+```
+
+##### Summary of strains assayed
+
+```{r}
+
+setdiff(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
+intersect(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
+union(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))
+
+
+length(unique(c(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03"))))
+
+length(unique(all.data$strain))
+length(unique(all.data$strain)[!unique(all.data$strain)  %in% strains_to_filter])
+
+length(strains_to_filter)
+
+
+all_strains_to_filter <- unique(c(strains_to_filter, c("23G1B10", "23G4B11", "24G2B09", "28G4A05", "28G4B03")))
+
+length(all_strains_to_filter)
+
+
+## ok strains
+all.data |> distinct(strain, .keep_all = T) |> 
+  filter(!strain %in% all_strains_to_filter) |> 
+  group_by(clade) |> count()
+
+all.data |> distinct(strain, .keep_all = T) |> 
+  filter(!strain %in% all_strains_to_filter) |> 
+  group_by(subclade) |> count()
+
+## not ok strains
+
+all.data |> distinct(strain, .keep_all = T) |> 
+  filter(strain %in% all_strains_to_filter) |> 
+  group_by(clade) |> count()
+
+all.data |> distinct(strain, .keep_all = T) |> 
+  filter(strain %in% all_strains_to_filter) |> 
+  group_by(subclade) |> count()
+
+
+for (cld in c("I", "II","III", "IV")) {
+  
+   # get all strains in this subclade
+  all_strains <- table.sum %>%
+    filter(strain %in% all_strains_to_filter &
+             clade != "UND" &
+             !is.na(subclade)) %>%
+    filter(clade == cld) %>%
+    arrange(subclade) |> 
+    pull(strain) %>%
+    unique()
+  
+   # split into chunks of up to 16
+  strain_chunks <- split(all_strains, 
+                         ceiling(seq_along(all_strains) / 16))
+  
+  # loop over each chunk (page)
+  for (i in seq_along(strain_chunks)) {
+    this_strains <- strain_chunks[[i]]
+
+    pH_curve <- table.sum |>
+      filter(strain %in% all_strains_to_filter &
+                                 clade != "UND" & !is.na(subclade)) %>%
+      filter(clade == cld, strain %in% this_strains) |> 
+      mutate(r_mean = if_else(pH %in% c(9.8, 10.1) & r_mean > 0.00001, 0, r_mean)) |> 
+      ggplot(aes(x = pH,
+                          color = subclade,
+                          group = subclade,
+                          y = r_mean)) +
+        scale_color_manual(values = subclade_col, guide = "none") +
+        geom_smooth(aes(fill = subclade), linewidth = 0.5) +
+        scale_fill_manual(values = subclade_col, guide = "none") +
+        geom_point(size = 1) +
+        geom_errorbar(aes(ymin = r_mean-r_sd, ymax = r_mean+r_sd), width = .2) +
+        scale_x_continuous(breaks = seq(3.2, 10.1, 0.6)) +
+        ggh4x::facet_nested_wrap(subclade~strain, ncol = 4) +
+        ylim(0, 0.6) +
+        ylab("Growth rate (r)") +
+        apatheme +
+        theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+              text = element_text(size = 8),
+              strip.background = element_blank(),
+              #strip.text.x = element_blank(),
+              plot.title = element_text(color = "black", size = 8),
+              plot.subtitle = element_text(color = "black", size = 6),
+              legend.position = "bottom")
+      
+      print(pH_curve)
+      
+    }
+  }
+
+
+
+#### now let's get a table to map onto the tree which strains have been tested and
+
+all_strains_to_filter <- c(all_strains_to_filter, "04D05", "04G2A08")
+
+
+ok_strains <- all.data |> distinct(strain, .keep_all = T) |> 
+  filter(!strain %in% all_strains_to_filter) |> 
+  mutate(pH_assay_ok = "YES") |>
+  select(strain, pH_assay_ok)
+
+not_ok_strains <- all.data |> distinct(strain, .keep_all = T) |> 
+  filter(strain %in% all_strains_to_filter) |> 
+  mutate(pH_assay_ok = "NO") |>
+  select(strain, pH_assay_ok)
+
+
+pH_ok_strains <- bind_rows(ok_strains, not_ok_strains)
+
+
+write.table(pH_ok_strains,
+            file = here("output/pH/pH_assay_ok_strain_table.txt"),
+            quote = F,
+            row.names = F,
+            col.names = T,
+            sep = "\t")
+
+
+
+## let's pull some of the positive controls for the Magnesium test
+
+control_strains <- 
+  all.data |>
+  filter(strain %in%  c("25G2A02", "26G4B12", "23G4B03", "18G4B09")) |>
+  select(strain, date) |>
+  distinct(.keep_all = T)
+
+all.data |>
+  filter(strain %in%  "23G4B03") |>
+  select(strain, date) |>
+  distinct(.keep_all = T)
+
+```
+
+#### pH curves parameters calculation
+
+Now we can calculate the pH curves parameters for each strain:
+
+  1. Area under the curve
+  2. Range
+  3. Optimal pH
+
+
+```{r calculate curve paramters, message=TRUE, warning=TRUE}
+library(pracma)
+
+head(random_data)
+
+
+random_data$r_mean[random_data$pH %in% c(9.8, 10.1) & random_data$r_mean > 0.0001] <- 0
+random_data$k_mean[random_data$pH %in% c(9.8, 10.1) & random_data$k_mean > 0.0001] <- 0
+
+
+
+# Group by strain and calculate area under the curve for each strain
+result_auc <- random_data %>%
+  group_by(strain) %>%
+  group_split() %>%
+  lapply(calculate_auc) %>%
+  bind_rows()
+
+# Print the result data frame
+print(result_auc)
+
+
+
+# Apply the function for each strain in the result_df
+max_rk_mean_results <- random_data %>%
+  group_by(strain) %>%
+  do(get_max_rk_mean(.))
+
+# Print the results
+print(max_rk_mean_results)
+
+
+
+result_range_r <- random_data %>%
+  filter(r_mean != 0) %>%
+  group_by(strain) %>%
+  summarise(min_pH_r = min(pH),
+            max_pH_r = max(pH),
+            breadth_r = max(pH) - min(pH))
+
+print(result_range_r)
+
+result_range_k <- random_data %>%
+  filter(k_mean != 0) %>%
+  group_by(strain) %>%
+  summarise(min_pH_k = min(pH),
+            max_pH_k = max(pH),
+            breadth_k = max(pH) - min(pH))
+
+print(result_range_k)
+
+
+
+curve_params <- merge(result_auc, max_rk_mean_results, by = "strain") %>%
+  merge(., result_range_r, by = "strain") %>%
+  merge(., result_range_k, by = "strain") %>%
+  filter(!strain %in% strains_to_filter)
+
+#write.table(as.data.frame(curve_params$strain), file = "~/SyncFolder/CA_curto/isolates/fastANI_out_WI/working_isolates.tsv", row.names = FALSE, quote = F, sep = "\t")
+
+write.table(as.data.frame(curve_params |>
+                            select(strain) |>
+                            rename(StrainID = strain) |>
+                            mutate(pH = "yes")),
+            file = here("output/pH/pH_strain_table.txt"), row.names = FALSE, quote = F, sep = "\t")
+
+
+### PCA of curve parameters
+curve_params <- curve_params %>% tibble::column_to_rownames("strain")
+
+
+r_traits <- c(colnames(curve_params |> select(ends_with("_r") & !starts_with("area"))))
+k_traits <- c(colnames(curve_params |> select(ends_with("_k") & !starts_with("area"))))
+
+pca <-prcomp(curve_params |>
+               tibble::rownames_to_column("strain") |> 
+               left_join(clade_info, by = "strain") |>
+               filter(!is.na(clade),
+                      clade != "UND",
+                      !is.na(subclade)) |>
+               filter(subclade %in% c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVC")) |>
+               tibble::column_to_rownames("strain") |>
+               select(all_of(r_traits))
+             , scale. = T, center = T)
+
+
+pca.df <- data.frame(pca$x) %>%
+  select(PC1, PC2) %>%
+  merge(., master_md, by.x = "row.names", by.y = "Name", all.x = T)
+
+pca.df$clade_color <- clade_colors$color[match(pca.df$clade, clade_colors$variable)]
+pca.df$subclade_color <- clade_colors$color[match(pca.df$subclade, clade_colors$variable)]
+PCAloads <- data.frame(Variables = rownames(pca$rotation), pca$rotation) |>
+  mutate(Variables = recode(Variables,
+                            "min_pH_r" = "Min. pH",
+                            "opt_pH_r" = "Opt. pH",
+                            "max_pH_r" = "Max. pH",
+                            "max_r_mean" = "Growth rate",
+                            "breadth_r" = "Breadth"))
+
+pca_plot<-ggplot(pca.df
+                 , aes(PC1, PC2)) +
+  geom_point(data = pca.df, aes(color = subclade),  size = 2, alpha = 0.75) +
+  scale_color_manual(values = subclade_col, name="Subclade") +
+  geom_segment(data = PCAloads,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               arrow = arrow(length = unit(0.3, "cm")),
+               colour="grey", inherit.aes = FALSE) +
+ geom_label(data=PCAloads,
+           aes(x=PC1*2.65, y=PC2*2.65, label=Variables),
+           size=3,
+           colour = "darkblue") +
+  xlab(paste0("PC1 (",round(summary(pca)$importance[2,1] * 100, 2),"%)")) +
+  ylab(paste0("PC2 (",round(summary(pca)$importance[2,2] * 100, 2),"%)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 10),
+        legend.position = "inside",
+        legend.position.inside = c(0.85, 0.8),
+        legend.background = element_rect(fill = alpha("white", 0.3), color = NA),
+        legend.key.size = unit(0.5, "lines"))
+pca_plot
+
+ggsave(
+      filename = "plots/pca_curve_params_r_topSubclades.pdf",
+      plot     = pca_plot,
+      width    = 90,
+      height   = 90,
+      units    = "mm",
+      dpi      = 300,
+      device = cairo_pdf
+    )
+  
+
+summary(pca)
+
+
+pca_k <-prcomp(curve_params |>
+               tibble::rownames_to_column("strain") |> 
+               left_join(clade_info, by = "strain") |>
+               filter(!is.na(clade),
+                      clade != "UND",
+                      !is.na(subclade)) |>
+               filter(subclade %in% c("IC", "IIG", "IIIA",
+                                      #"IIIE",
+                                      "IVB"#, "IVC"
+                                      )) |>
+               tibble::column_to_rownames("strain") |>
+               select(all_of(k_traits))
+             , scale. = T, center = T)
+
+
+pca.df_k <- data.frame(pca_k$x) %>%
+  select(PC1, PC2) %>%
+  merge(., master_md, by.x = "row.names", by.y = "Name", all.x = T)
+
+pca.df_k$clade_color <- clade_colors$color[match(pca.df_k$clade, clade_colors$variable)]
+pca.df_k$subclade_color <- clade_colors$color[match(pca.df_k$subclade, clade_colors$variable)]
+PCAloads_k <- data.frame(Variables = rownames(pca_k$rotation), pca_k$rotation) |>
+  mutate(Variables = recode(Variables,
+                            "min_pH_k" = "Min. pH",
+                            "opt_pH_k" = "Opt. pH",
+                            "max_pH_k" = "Max. pH",
+                            "max_k_mean" = "Yeild",
+                            "breadth_k" = "Breadth"))
+
+pca_plot_k<-ggplot(pca.df_k
+                 , aes(PC1, PC2)) +
+  geom_point(data = pca.df_k, aes(color = subclade),  size = 1.5, alpha = 0.75) +
+  scale_color_manual(values = subclade_col, name="Subclade") +
+  geom_segment(data = PCAloads_k,
+               aes(x=0,xend=PC1*2.5,y=0,yend=PC2*2.5),
+               colour="grey", inherit.aes = FALSE) +
+   geom_text(data=PCAloads_k,
+           aes(x=PC1*4.5, y=PC2*4.5, label=Variables),
+           size=2,
+           colour = "black",
+           fontface = "bold") +
+  lims(x = c(-4, 4),
+       y = c(-6, 6)) +
+  xlab(paste0("PC1 (",round(summary(pca_k)$importance[2,1] * 100, 2),"%)")) +
+  ylab(paste0("PC2 (",round(summary(pca_k)$importance[2,2] * 100, 2),"%)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 8),
+        legend.position = "none",
+        legend.position.inside = c(0.9, 0.2),
+        legend.background = element_rect(fill = alpha("white", 0), color = NA),
+        legend.key.size = unit(0.5, "lines"),
+        legend.title = element_text(size = 6,
+                                    margin = margin(b = 0, unit = "pt")),
+        legend.text = element_text(size = 5),
+        legend.key.height = unit(0.4, "lines"),
+        legend.key.width = unit(0.7, "lines"),
+        legend.spacing.y = unit(0, "cm"))
+
+pca_plot_k
+
+ggsave(
+      filename = "plots/pca_curve_params_K_topSubclades.pdf",
+      plot     = pca_plot_k,
+      width    = 90,
+      height   = 90,
+      units    = "mm",
+      dpi      = 300,
+      device = cairo_pdf
+    )
+
+
+summary(pca_k)
+
+
+curve_params |>
+               tibble::rownames_to_column("strain") |> 
+               left_join(clade_info, by = "strain") |>
+               filter(!is.na(clade),
+                      clade != "UND",
+                      !is.na(subclade)) |>
+               filter(subclade %in% c("IC", "IIG", "IIIA",
+                                      #"IIIE",
+                                      "IVB"#, "IVC"
+                                      )) |>
+  summarise(avg.pHopt = mean(opt_pH_k, na.rm. = T),
+            avg.minpH = mean(min_pH_k, na.rm. = T),
+            avg.maxpH = mean(max_pH_k, na.rm. = T),
+            avg.breadth = mean(breadth_k, na.rm. = T))
+
+curve_params |>
+               tibble::rownames_to_column("strain") |> 
+               left_join(clade_info, by = "strain") |>
+               filter(!is.na(clade),
+                      clade != "UND",
+                      !is.na(subclade)) |>
+               filter(subclade %in% c("IC", "IIG", "IIIA",
+                                      #"IIIE",
+                                      "IVB"#, "IVC"
+                                      )) |>
+  group_by(subclade) |>
+  summarise(avg.pHopt = mean(opt_pH_k, na.rm. = T),
+            avg.minpH = mean(min_pH_k, na.rm. = T),
+            avg.maxpH = mean(max_pH_k, na.rm. = T),
+            avg.breadth = mean(breadth_k, na.rm. = T))
+
+D <- dist(pca_k$x, "euclidean")
+
+perm <- vegan::adonis2(D ~ subclade, data = pca.df_k, permutations = 999)
+
+perm
+
+
+
+```
+
+
+#### heat maps of curve parameters
+
+```{r heat maps, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
+head(curve_params)
+library(ggh4x)
+# Add a new column for rownames (Strain IDs)
+curve_params$Strain <- rownames(curve_params)
+
+curve_params <- merge(curve_params, clade_info, by.x = "Strain", by.y = "strain", all.x = T)
+
+# Arrange the data by the clade variable
+curve_params <- curve_params %>%
+  arrange(clade, subclade, Strain) #%>% filter(Strain != "33G1A03")
+
+write.table(as.data.frame(curve_params |>
+                            select(Strain) |>
+                            rename(StrainID = Strain) |>
+                            mutate(pH = "yes")),
+            file = here("output/pH/pH_strain_table.txt"), row.names = FALSE, quote = F, sep = "\t")
+
+
+
+# Assuming your data is stored in a dataframe called curve_params
+# Convert the data to long format
+curve_params_long <- pivot_longer(curve_params,
+                                  cols = where(is.numeric),
+                                  names_to = "Parameter",
+                                  values_to = "Value")
+
+# Scale the data to z-scores by grouping by 'Parameter'
+curve_params_long <- curve_params_long %>%
+  group_by(Parameter) %>%
+  mutate(Value_z = scale(Value)) %>%
+  ungroup()
+
+
+clade_color_vector <- setNames(clade_colors$color, clade_colors$variable)
+
+
+# Create the heatmap
+ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r") & clade != "UND")
+       ,
+       aes(x = Parameter,
+                              y = factor(Strain, levels = unique(Strain)),
+                              fill = Value_z)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
+  labs(x = "Parameter", y = "Strain", fill = "Z-score") +
+  ggh4x::facet_grid2(clade ~ ., scales = "free_y", space = "fixed", switch = "y",
+              strip = ggh4x::strip_themed(
+                background_y = ggh4x::elem_list_rect(
+                  fill = clade_color_vector[unique(curve_params_long$clade)]
+                )
+              )) +
+  scale_x_discrete(position = "top", labels = c("Max. pH", "rmax", "Opt. pH")) +
+  apatheme +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, face = "bold"),  # Align text horizontally and center
+    axis.text.y = element_blank(),  # Remove y-axis text
+    axis.ticks.y = element_blank(),  # Remove y-axis ticks
+    strip.placement = "inside",  # Place facet strips outside the plot area
+    strip.text = element_text(face = "bold"),  # Bold text for facet labels
+    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
+    strip.background = element_blank(),  # Remove the default strip background
+    strip.text.y.left = element_text(angle = 0, vjust = 1, hjust = 1),  # Align facet labels on the left
+    legend.title=element_text(size=11), 
+    legend.text=element_text(size=10),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.justification = "center",
+    legend.box.spacing = unit(0, "lines"),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    text = element_text(size = 22),
+    panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border=element_blank()# Ensure the y-axis title is removed
+  ) +
+   scale_y_discrete(position = "right") 
+  # Align facet labels on the left
+
+ggsave("plots/heatmap_curve_params.png",
+       width = 6,
+       height = 12,
+       units = "cm",
+       dpi = 600)
+
+# Create the horizontal heatmap
+ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r") & clade != "UND"),
+       aes(x = factor(Strain, levels = unique(Strain)),
+           y = Parameter,
+           fill = Value_z)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
+  labs(x = "Strain", y = "Parameter", fill = "Z-score") +
+  ggh4x::facet_grid2(. ~ clade, scales = "free_x", space = "fixed",
+                     strip = ggh4x::strip_themed(
+                       background_x = elem_list_rect(
+                         fill = clade_color_vector[unique(curve_params_long$clade)]
+                       )
+                     )) +
+  scale_y_discrete(labels = c("Max. pH", "rmax", "Opt. pH")) +  # Adjust the y-axis labels
+  theme_minimal() +
+  theme(
+    text = element_text(size = 22),
+    axis.text.y = element_text(angle = 0, hjust = 0.5, size = 14, face = "bold"),  # Align text horizontally and center
+    axis.text.x = element_blank(),  # Remove x-axis text (Strain)
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks (Strain)
+    strip.placement = "inside",  # Place facet strips inside the plot area
+    strip.text = element_text(face = "bold"),  # Bold text for facet labels
+    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
+    strip.background = element_blank(),  # Remove the default strip background
+    strip.text.x.top = element_text(angle = 0, vjust = 1, hjust = 0.5),  # Align facet labels on the top
+    legend.title = element_text(size = 11, margin = margin(b = 0)), 
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    legend.box = "horizontal",
+    legend.justification = "center",
+    legend.box.spacing = unit(0, "lines"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),  # Ensure the y-axis title is removed
+    #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
+  )
+
+ggsave("plots/heatmap_curve_params.png",
+       width = 27,
+       height = 4,
+       units = "cm",
+       dpi = 600)
+
+
+# Create the horizontal heatmap subclade level
+ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r") & clade != "UND"),
+       aes(x = factor(Strain, levels = unique(Strain)),
+           y = Parameter,
+           fill = Value_z)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       guide = guide_colorbar(title.position = "top", title.hjust = 0.5)) +  # Adjust colors as necessary
+  labs(x = "Strain", y = "Parameter", fill = "Z-score") +
+  ggh4x::facet_grid2(. ~ subclade, scales = "free_x", space = "fixed",
+                     strip = ggh4x::strip_themed(
+                       background_x = elem_list_rect(
+                         fill = clade_color_vector[unique(curve_params_long$subclade)]
+                       )
+                     )) +
+  scale_y_discrete(labels = c("Max. pH", "rmax", "Opt. pH")) +  # Adjust the y-axis labels
+  theme_minimal() +
+  theme(
+    text = element_text(size = 22),
+    axis.text.y = element_text(angle = 0, hjust = 0.5, size = 14, face = "bold"),  # Align text horizontally and center
+    axis.text.x = element_blank(),  # Remove x-axis text (Strain)
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks (Strain)
+    strip.placement = "inside",  # Place facet strips inside the plot area
+    strip.text = element_text(face = "bold"),  # Bold text for facet labels
+    panel.spacing = unit(0, "lines"),  # Adjust spacing between panels
+    strip.background = element_blank(),  # Remove the default strip background
+    strip.text.x.top = element_text(angle = 0, vjust = 1, hjust = 0.5),  # Align facet labels on the top
+    legend.title = element_text(size = 11, margin = margin(b = 0)), 
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    legend.box = "horizontal",
+    legend.justification = "center",
+    legend.box.spacing = unit(0, "lines"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),  # Ensure the y-axis title is removed
+    #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
+  )
+
+ggsave("plots/heatmap_curve_params_subclade.png",
+       width = 27,
+       height = 4,
+       units = "cm",
+       dpi = 600)
+
+
+
+write.table(curve_params |> select(-c(clade, subclade)),
+            file = here("output/pH/curve_params.tsv"), row.names = FALSE, quote = F, sep = "\t")
+
+
+
+#### dot plot
+
+
+
+# Plot just two subclades, and save:
+curve_params_dot_plot <- dotplot_traits_by_subclade(
+  params_df  = curve_params_long,
+  traits     = c("opt_pH_r", "max_r_mean", "max_pH_r"),
+  subclades  = NULL,
+  facet_by_clade = T,
+  filename   = "plots/curve_params_dotplot_Subclades.png"
+)
+
+# Plot just two subclades, and save:
+curve_params_dot_plot_k <- dotplot_traits_by_subclade(
+  params_df  = curve_params_long,
+  traits     = c("breadth_k", "opt_pH_k", "max_k_mean", "max_pH_k"),
+  subclades  = NULL,
+  facet_by_clade = T,
+  filename   = "plots/curve_params_dotplot_Subclades_K.png"
+)
+
+
+# Plot just two subclades, and save:
+curve_params_dot_plot_top <- dotplot_traits_by_subclade(
+  params_df  = curve_params_long,
+  traits     = c("opt_pH_r", "max_r_mean", "max_pH_r"),
+  subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
+  facet_by_clade = F,
+  filename   = "plots/curve_params_dotplot_TopSubclades.png"
+)
+
+# Plot just two subclades, and save:
+curve_params_dot_plot_top_k <- dotplot_traits_by_subclade(
+  params_df  = curve_params_long,
+  traits     = c("breadth_k","opt_pH_k", "max_k_mean", "max_pH_k"),
+  subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
+  facet_by_clade = F,
+  filename   = "plots/curve_params_dotplot_TopSubclades_K.png"
+)
+
+
+
+
+posthocs <- curve_params_long %>%
+  # only keep the subclades you care about
+  filter(subclade %in% c("IC","IIG","IIIA","IIIE","IVB","IVE")) %>%
+  group_by(Parameter) %>%
+  do({
+    dat <- .
+
+    # 1) must have ≥2 subclades and each with ≥2 obs
+    sub_counts <- dat %>% count(subclade) 
+    if (n_distinct(dat$subclade) < 2 ||
+        any(sub_counts$n < 2)) {
+      return(tibble()) 
+    }
+
+    # 2) normality?
+    if (nrow(dat) >= 3) {
+      sw_p <- dat |> rstatix::shapiro_test(Value) |> pull(p)
+    } else {
+      sw_p <- NA_real_
+    }
+
+    # 3) homogeneity?
+    lev_p <- rstatix::levene_test(dat, Value ~ subclade)$p
+
+    # 4) choose test
+    if (!is.na(sw_p) && sw_p > 0.05 && lev_p > 0.05) {
+      # ANOVA + Tukey
+      omni <- rstatix::anova_test(dat, Value ~ subclade)
+      ph   <- rstatix::tukey_hsd(dat, Value ~ subclade) %>%
+                mutate(method = "Tukey HSD")
+      test_type <- "ANOVA"
+    } else {
+      # Kruskal–Wallis + Dunn
+      omni <- rstatix::kruskal_test(dat, Value ~ subclade)
+      ph   <- rstatix::dunn_test(dat, Value ~ subclade, p.adjust.method = "BH") %>%
+                mutate(method = "Dunn (BH)")
+      test_type <- "KW"
+    }
+
+    # 5) build omnibus row
+    x_max <- max(dat$Value, na.rm = TRUE)
+    omnibus_df <- tibble(
+      Parameter        = unique(dat$Parameter),
+      group1       = NA_character_,
+      group2       = NA_character_,
+      p.adj        = omni$p,
+      p.adj.signif = as.character(
+                                  symnum(omni$p,
+                                         corr = F,
+                                         cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                                         symbols   = c("***","**","*","ns"))
+                                  ),
+      x.position   = x_max * 1.08,
+      method       = test_type
+      )
+    
+    # 6) position pairwise rows just below
+    ph_df <- ph %>%
+      mutate(
+        Parameter         = unique(dat$Parameter),
+        p.adj.signif = as.character(
+                          symnum(p.adj,
+                                 corr = F,
+                                 cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                                 symbols   = c("***","**","*","ns"))
+                        ),
+        x.position = x_max * 1.05)
+
+    bind_rows(omnibus_df, ph_df)
+  }) %>%
+  ungroup()
+
+# Inspect your posthocs table
+posthocs
+
+# 2. Compute max per panel so we can place omnibus labels
+panel_ranges <- curve_params_long %>%
+  filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r")) |>
+  group_by(Parameter) %>%
+  summarise(xmax = max(Value, na.rm=TRUE), .groups="drop") %>%
+  mutate(xpos = xmax * 1.02)     # 2% beyond the data
+
+# 4. Join in the xpos
+posthocs <- posthocs %>%
+  left_join(panel_ranges, by = "Parameter")
+
+
+# 1) Pull out just your omnibus rows
+posthocs_omni <- posthocs %>%
+  filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r"),) |>
+  filter(is.na(group1))
+
+
+# 2) For each term, build a named vector of p’s and feed to multcompLetters
+letter_df <- posthocs %>%
+  filter(Parameter %in% c("opt_pH_r", "max_r_mean", "max_pH_r"),) |>
+  filter(!is.na(group1)) %>% 
+  select(Parameter, group1, group2, p.adj) |> 
+  group_by(Parameter) %>%
+  summarise(
+    # build a named vector c("A-B"=p1, "A-C"=p2, ...)
+    pv = list( setNames(p.adj, paste(group1, group2, sep = "-")) ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # run multcompLetters on each vector
+    letters = map(pv, ~ multcompView::multcompLetters(.x, threshold = 0.05)$Letters)
+  ) %>%
+  select(-pv) %>%
+  unnest_longer(letters, indices_to = "subclade", values_to = "letter") |>
+  left_join(panel_ranges, by = "Parameter")
+
+
+# 2) Add the text directly
+curve_params_dot_plot_top +
+  geom_text(
+    data        = posthocs_omni,
+    aes(x        = x.position * 0.85,
+        y        = 0.65,
+        label    = p.adj.signif),
+    inherit.aes = FALSE,
+    size = 6,
+    hjust = 0      # left‐justify so it sits just outside
+  ) +
+  geom_text(
+    data        = letter_df,
+    aes(x     = xpos * 0.1,
+        y     = subclade,
+        label = letter),
+    inherit.aes = FALSE,
+    size        = 5,
+    hjust       = 0
+  )
+
+
+ggsave(
+      filename = "plots/curve_params_dotplot_TopSubclades.png",
+      width    = 180,
+      height   = 100,
+      units    = "mm",
+      dpi      = 300
+    )
+
 
 
 
@@ -2492,8 +2379,7 @@ ggpubr::ggarrange(pH_curve_avg_subclades, out_r$plot,
                   font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/combined_avg_params_r.png"  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
-      ,
+      filename = "plots/combined_avg_params_r.png",
       width    = 100,
       height   = 100,
       units    = "mm",
@@ -2525,6 +2411,14 @@ out_k <- plot_traits_subclade(
 )
 
 
+```
+
+##### Figures included in the publication pH
+###### pH curves with K and dotplots and combined figures
+
+The K-only trait dot plots (`out_k_all`, `out_k_all_subclades`) and the combined multi-panel figures below are included in the publication
+
+```{r figs-not-in-pub-K-all, fig.width=18, fig.height = 14, message=FALSE, warning=FALSE, echo=FALSE}
 #### for K_all
 
 out_k_all <- plot_traits_subclade(
@@ -2580,8 +2474,6 @@ table(is.na(curve_params$subclade))
 opt_by_sub <- curve_params |>
   dplyr::filter(subclade %in% c("IC","IIG","IIIA","IIIE","IVB","IVE")) |>
   dplyr::group_by(subclade) |>
-  #dplyr::slice_max(opt_pH_k, n = 1, with_ties = FALSE) |>
-  #summarise(opt_pH_k = mean(opt_pH_k)) |>
   summarise(n = sum(!is.na(opt_pH_k)),
             mean_pHopt = mean(opt_pH_k),
             med_pHopt = median(opt_pH_k),
@@ -2589,8 +2481,7 @@ opt_by_sub <- curve_params |>
             pHopt_sd = sd(opt_pH_k),
             mean_maxPH = mean(max_pH_k)
             ) |>
-  dplyr::ungroup() #|>
-  #dplyr::transmute(subclade, opt_pH = opt_pH_k)
+  dplyr::ungroup()
 
 
 pH_curve_avg_subclades_K <- pH_curve_avg_subclades_K +
@@ -2620,8 +2511,7 @@ ggpubr::ggarrange(pH_curve_avg_subclades_K, out_k$plot,
                   font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/combined_avg_params_k.png"  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
-      ,
+      filename = "plots/combined_avg_params_k.png",
       width    = 100,
       height   = 100,
       units    = "mm",
