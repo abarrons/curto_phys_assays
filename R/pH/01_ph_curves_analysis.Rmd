@@ -752,7 +752,7 @@ final.table <- anova_results %>%
 
 final.table <- merge(final.table, clade_info, by = "strain", all.x = T)
 
-write.csv(final.table, file = "anova_pH_results.csv", row.names = FALSE)
+write.csv(final.table, file = here("anova_pH_results.csv"), row.names = FALSE)
 
 ## create strings to color by:
 ## clade:
@@ -970,7 +970,7 @@ for (cld in c("I", "II","III", "IV")) {
       print(pH_curve)
       
       # now save it
-    fn <- sprintf("plots/pH_curves/pH_curves_%s_page%02d.png", cld, i)
+    fn <- here(sprintf("plots/pH_curves/pH_curves_%s_page%02d.png", cld, i))
     ggsave(
       filename = fn,
       plot     = pH_curve,
@@ -1013,7 +1013,7 @@ for (cld in c("I", "II","III", "IV")) {
 
 print(pH_curve_rndm_clades)
 
-ggsave("plots/pH_curve_1rp_by_date_clades.png",
+ggsave(here("plots/pH_curve_1rp_by_date_clades.png"),
        width = 30,
        height = 10,
        units = "cm",
@@ -1068,7 +1068,7 @@ pH_curve_rndm_subclades<-ggplot(random_data %>%
 
 print(pH_curve_rndm_subclades)
 
-ggsave("plots/pH_curve_1rp_by_date_subclades.png",
+ggsave(here("plots/pH_curve_1rp_by_date_subclades.png"),
        width = 60,
        height = 10,
        units = "cm",
@@ -1105,7 +1105,7 @@ pH_curve_rndm_TopSubclades <- random_data %>%
 
 print(pH_curve_rndm_TopSubclades)
 
-ggsave("plots/pH_curve_1rp_by_date_TopSubclades.png",
+ggsave(here("plots/pH_curve_1rp_by_date_TopSubclades.png"),
        width = 30,
        height = 7.5,
        units = "cm",
@@ -1246,7 +1246,7 @@ for (cld in c("I", "II","III", "IV")) {
       print(pH_curve)
       
       # now save it
-    fn <- sprintf("plots/pH_curves/pH_curves_K_%s_page%02d.png", cld, i)
+    fn <- here(sprintf("plots/pH_curves/pH_curves_K_%s_page%02d.png", cld, i))
     ggsave(
       filename = fn,
       plot     = pH_curve,
@@ -1290,7 +1290,7 @@ for (cld in c("I", "II","III", "IV")) {
 
 print(pH_curve_rndm_clades_K)
 
-ggsave("plots/pH_curve_1rp_by_date_clades_K.png",
+ggsave(here("plots/pH_curve_1rp_by_date_clades_K.png"),
        width = 30,
        height = 10,
        units = "cm",
@@ -1345,7 +1345,7 @@ pH_curve_rndm_subclades_K<-ggplot(random_data %>%
 
 print(pH_curve_rndm_subclades_K)
 
-ggsave("plots/pH_curve_1rp_by_date_subclades_K.png",
+ggsave(here("plots/pH_curve_1rp_by_date_subclades_K.png"),
        width = 60,
        height = 10,
        units = "cm",
@@ -1383,7 +1383,7 @@ pH_curve_rndm_TopSubclades_K <- random_data %>%
 
 print(pH_curve_rndm_TopSubclades_K)
 
-ggsave("plots/pH_curve_1rp_by_date_TopSubclades_K.png",
+ggsave(here("plots/pH_curve_1rp_by_date_TopSubclades_K.png"),
        width = 30,
        height = 7.5,
        units = "cm",
@@ -1805,7 +1805,7 @@ pca_plot<-ggplot(pca.df
 pca_plot
 
 ggsave(
-      filename = "plots/pca_curve_params_r_topSubclades.pdf",
+      filename = here("plots/pca_curve_params_r_topSubclades.pdf"),
       plot     = pca_plot,
       width    = 90,
       height   = 90,
@@ -1881,7 +1881,7 @@ pca_plot_k<-ggplot(pca.df_k
 pca_plot_k
 
 ggsave(
-      filename = "plots/pca_curve_params_K_topSubclades.pdf",
+      filename = here("plots/pca_curve_params_K_topSubclades.pdf"),
       plot     = pca_plot_k,
       width    = 90,
       height   = 90,
@@ -2019,7 +2019,7 @@ ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "
    scale_y_discrete(position = "right") 
   # Align facet labels on the left
 
-ggsave("plots/heatmap_curve_params.png",
+ggsave(here("plots/heatmap_curve_params.png"),
        width = 6,
        height = 12,
        units = "cm",
@@ -2066,7 +2066,7 @@ ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "
     #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
   )
 
-ggsave("plots/heatmap_curve_params.png",
+ggsave(here("plots/heatmap_curve_params.png"),
        width = 27,
        height = 4,
        units = "cm",
@@ -2114,7 +2114,7 @@ ggplot(curve_params_long %>% filter(Parameter %in% c("opt_pH_r", "max_r_mean", "
     #plot.margin = margin(10, 10, 10, 10)  # Adjust plot margins if necessary
   )
 
-ggsave("plots/heatmap_curve_params_subclade.png",
+ggsave(here("plots/heatmap_curve_params_subclade.png"),
        width = 27,
        height = 4,
        units = "cm",
@@ -2137,7 +2137,7 @@ curve_params_dot_plot <- dotplot_traits_by_subclade(
   traits     = c("opt_pH_r", "max_r_mean", "max_pH_r"),
   subclades  = NULL,
   facet_by_clade = T,
-  filename   = "plots/curve_params_dotplot_Subclades.png"
+  filename   = here("plots/curve_params_dotplot_Subclades.png")
 )
 
 # Plot just two subclades, and save:
@@ -2146,7 +2146,7 @@ curve_params_dot_plot_k <- dotplot_traits_by_subclade(
   traits     = c("breadth_k", "opt_pH_k", "max_k_mean", "max_pH_k"),
   subclades  = NULL,
   facet_by_clade = T,
-  filename   = "plots/curve_params_dotplot_Subclades_K.png"
+  filename   = here("plots/curve_params_dotplot_Subclades_K.png")
 )
 
 
@@ -2156,7 +2156,7 @@ curve_params_dot_plot_top <- dotplot_traits_by_subclade(
   traits     = c("opt_pH_r", "max_r_mean", "max_pH_r"),
   subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
   facet_by_clade = F,
-  filename   = "plots/curve_params_dotplot_TopSubclades.png"
+  filename   = here("plots/curve_params_dotplot_TopSubclades.png")
 )
 
 # Plot just two subclades, and save:
@@ -2165,7 +2165,7 @@ curve_params_dot_plot_top_k <- dotplot_traits_by_subclade(
   traits     = c("breadth_k","opt_pH_k", "max_k_mean", "max_pH_k"),
   subclades  = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
   facet_by_clade = F,
-  filename   = "plots/curve_params_dotplot_TopSubclades_K.png"
+  filename   = here("plots/curve_params_dotplot_TopSubclades_K.png")
 )
 
 
@@ -2307,7 +2307,7 @@ curve_params_dot_plot_top +
 
 
 ggsave(
-      filename = "plots/curve_params_dotplot_TopSubclades.png",
+      filename = here("plots/curve_params_dotplot_TopSubclades.png"),
       width    = 180,
       height   = 100,
       units    = "mm",
@@ -2336,7 +2336,7 @@ out_r <- plot_traits_subclade(
   show_annotations = "both",
   omnibus_in_clade = "I",           # show omnibus star in clade I row
   subclade_col = subclade_col,      # named vector of colours
-  filename = "plots/curve_params_dotplot_Subclades_flip.png",
+  filename = here("plots/curve_params_dotplot_Subclades_flip.png"),
   width_mm = 180, height_mm = 120, dpi = 300
 )
 
@@ -2358,7 +2358,7 @@ out_r_all_subclades <- plot_traits_subclade(
   show_annotations = "both",
   omnibus_in_clade = "I",           # show omnibus star in clade I row
   subclade_col = subclade_col,      # named vector of colours
-  filename = "plots/curve_params_dotplot_Subclades_flip_r_all_subclades.png",
+  filename = here("plots/curve_params_dotplot_Subclades_flip_r_all_subclades.png"),
   width_mm = 180, height_mm = 120, dpi = 300
 )
 
@@ -2379,7 +2379,7 @@ ggpubr::ggarrange(pH_curve_avg_subclades, out_r$plot,
                   font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/combined_avg_params_r.png",
+      filename = here("plots/combined_avg_params_r.png"),
       width    = 100,
       height   = 100,
       units    = "mm",
@@ -2406,7 +2406,7 @@ out_k <- plot_traits_subclade(
   show_annotations = "both",
   omnibus_in_clade = "I",           # show omnibus star in clade I row
   subclade_col = subclade_col,      # named vector of colours
-  filename = "plots/curve_params_dotplot_Subclades_flip_K.png",
+  filename = here("plots/curve_params_dotplot_Subclades_flip_K.png"),
   width_mm = 180, height_mm = 120, dpi = 300
 )
 
@@ -2438,7 +2438,7 @@ out_k_all <- plot_traits_subclade(
   show_annotations = "both",
   omnibus_in_clade = "I",           # show omnibus star in clade I row
   subclade_col = subclade_col,      # named vector of colours
-  filename = "plots/curve_params_dotplot_Subclades_flip_K_all.png",
+  filename = here("plots/curve_params_dotplot_Subclades_flip_K_all.png"),
   width_mm = 180, height_mm = 120, dpi = 300
 )
 
@@ -2461,7 +2461,7 @@ out_k_all_subclades <- plot_traits_subclade(
   show_annotations = "both",
   omnibus_in_clade = "I",           # show omnibus star in clade I row
   subclade_col = subclade_col,      # named vector of colours
-  filename = "plots/curve_params_dotplot_Subclades_flip_K_all_subclades.png",
+  filename = here("plots/curve_params_dotplot_Subclades_flip_K_all_subclades.png"),
   width_mm = 180, height_mm = 120, dpi = 300
 )
 
@@ -2491,7 +2491,7 @@ pH_curve_avg_subclades_K <- pH_curve_avg_subclades_K +
              inherit.aes = FALSE)
 print(pH_curve_avg_subclades_K)
 
-ggsave("plots/pH_curve_TopSubclades_K.png",
+ggsave(here("plots/pH_curve_TopSubclades_K.png"),
        width = 120,
        height = 40,
        units = "mm",
@@ -2511,7 +2511,7 @@ ggpubr::ggarrange(pH_curve_avg_subclades_K, out_k$plot,
                   font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/combined_avg_params_k.png",
+      filename = here("plots/combined_avg_params_k.png"),
       width    = 100,
       height   = 100,
       units    = "mm",
@@ -2528,7 +2528,7 @@ ggpubr::ggarrange(pH_curve_avg_subclades_K, pca_plot_k,
                   font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/combined_avg_params_pca_k.png",
+      filename = here("plots/combined_avg_params_pca_k.png"),
       width    = 100,
       height   = 100,
       units    = "mm",
@@ -2550,7 +2550,7 @@ pH_curve_avgOnly_subclades_K_mean <- pH_curve_avgOnly_subclades_K +
              linetype = "dashed", linewidth = 0.75)
 print(pH_curve_avgOnly_subclades_K_mean)
 
-ggsave("plots/pH_curve_TopSubclades_K_avg_only.png",
+ggsave(here("plots/pH_curve_TopSubclades_K_avg_only.png"),
        width = 120,
        height = 40,
        units = "mm",
@@ -2563,7 +2563,7 @@ ggpubr::ggarrange(pH_curve_avgOnly_subclades_K_mean, pca_plot_k,
                   font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/combined_avgCurveOnly_pca_k.png",
+      filename = here("plots/combined_avgCurveOnly_pca_k.png"),
       width    = 60,
       height   = 100,
       units    = "mm",

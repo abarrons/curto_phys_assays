@@ -831,7 +831,7 @@ cor_plot <- ggplot(combined_cor_results_all, aes(x = correlation, fill = date_se
   theme(legend.position = "bottom")
 print(cor_plot)
 
-ggsave("plots/correlation_densityplots.png",
+ggsave(here("plots/correlation_densityplots.png"),
        width = 25,
        height = 20,
        units = "cm",
@@ -1358,7 +1358,7 @@ plot_temp_curves(
   strain_cols    = strain_subclade_col,
   subclades      = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
   facet_by_clade = FALSE,
-  filename       = "plots/temp_curves_topSubclades.png",
+  filename       = here("plots/temp_curves_topSubclades.png"),
   nrow           = 1,
   width_mm       = 300,
   height_mm      = 75
@@ -1372,7 +1372,7 @@ plot_temp_curves(
   strain_cols    = strain_subclade_col,
   subclades      = NULL,
   facet_by_clade = T,
-  filename       = "plots/temp_curves.png",
+  filename       = here("plots/temp_curves.png"),
   nrow           = 1
 )
 
@@ -1453,7 +1453,7 @@ for (subcld in c("IA", "IB", "IC",
   print(temp_curve)
   
   # now save it
-    fn <- sprintf("plots/temp_curves/temp_curves_%s_page%02d.png", subcld, i)
+    fn <- here(sprintf("plots/temp_curves/temp_curves_%s_page%02d.png", subcld, i))
     ggsave(
       filename = fn,
       plot     = temp_curve,
@@ -1579,7 +1579,7 @@ print(temp_curve_avg)
 
 
 ggsave(
-      filename = "plots/temp_curves/temp_curves_avg_topSubclades.png",
+      filename = here("plots/temp_curves/temp_curves_avg_topSubclades.png"),
       width    = 140,
       height   = 80,
       units    = "mm",
@@ -1625,7 +1625,7 @@ print(temp_curve_avg_only)
 
 
 ggsave(
-      filename = "plots/temp_curves/temp_curves_avgOnly_topSubclades.png",
+      filename = here("plots/temp_curves/temp_curves_avgOnly_topSubclades.png"),
       width    = 80,
       height   = 80,
       units    = "mm",
@@ -1820,7 +1820,7 @@ pca_plot.ssfull_topSubclades<-ggplot(pca.ssfull_topSubclades.df,
 pca_plot.ssfull_topSubclades
 
 ggsave(
-      filename = "plots/pca_plot.ssfull_topSubclades_r.pdf",
+      filename = here("plots/pca_plot.ssfull_topSubclades_r.pdf"),
       plot     = pca_plot.ssfull_topSubclades,
       width    = 90,
       height   = 90,
@@ -2149,7 +2149,7 @@ ggpubr::ggarrange(temp_curve_avg, out$plot,
                   hjust = 0.05, font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/temp_curves/combined_avg_params.png"
+      filename = here("plots/temp_curves/combined_avg_params.png")
       ,
       width    = 100,
       height   = 100,
@@ -2169,7 +2169,7 @@ ggpubr::ggarrange(temp_curve_avg, pca_plot.ssfull_topSubclades,
                   hjust = 0.05, font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/temp_curves/combined_avg_params_r_pca.png"
+      filename = here("plots/temp_curves/combined_avg_params_r_pca.png")
       ,
       width    = 100,
       height   = 100,
@@ -2222,7 +2222,7 @@ ggpubr::ggarrange(temp_curve_avg_only_mean, pca_plot.ssfull_topSubclades,
                   hjust = 0.05, font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/temp_curves/combined_avg_curveOnly_r_pca.png"
+      filename = here("plots/temp_curves/combined_avg_curveOnly_r_pca.png")
       ,
       width    = 60,
       height   = 100,
@@ -2588,7 +2588,7 @@ plot_temp_curves(
   strain_cols    = strain_subclade_col,
   subclades      = c("IC", "IIG", "IIIA", "IIIE", "IVB", "IVE"),
   facet_by_clade = FALSE,
-  filename       = "plots/temp_curves_topSubclades_k.png",
+  filename       = here("plots/temp_curves_topSubclades_k.png"),
   nrow           = 1,
   width_mm       = 300,
   height_mm      = 75
@@ -2602,7 +2602,7 @@ plot_temp_curves(
   strain_cols    = strain_subclade_col,
   subclades      = NULL,
   facet_by_clade = T,
-  filename       = "plots/temp_curves.png",
+  filename       = here("plots/temp_curves.png"),
   nrow           = 1
 )
 
@@ -2683,7 +2683,7 @@ for (subcld in c("IA", "IB", "IC",
   print(temp_curve)
   
   # now save it
-    fn <- sprintf("plots/temp_curves/temp_curves_k_%s_page%02d.png", subcld, i)
+    fn <- here(sprintf("plots/temp_curves/temp_curves_k_%s_page%02d.png", subcld, i))
     ggsave(
       filename = fn,
       plot     = temp_curve,
@@ -2805,7 +2805,7 @@ print(temp_curve_avg_k)
 
 
 ggsave(
-      filename = "plots/temp_curves/temp_curves_avg_topSubclades_k.png",
+      filename = here("plots/temp_curves/temp_curves_avg_topSubclades_k.png"),
       width    = 140,
       height   = 80,
       units    = "mm",
@@ -2981,7 +2981,7 @@ pca_plot.k_topSubcladesl<-ggplot(pca_k_topSubclades_df
 pca_plot.k_topSubcladesl
 
 ggsave(
-      filename = "plots/pca_plot.ssfull_topSubclades_k.pdf",
+      filename = here("plots/pca_plot.ssfull_topSubclades_k.pdf"),
       plot     = pca_plot.k_topSubcladesl,
       width    = 90,
       height   = 90,
@@ -3049,7 +3049,7 @@ ggpubr::ggarrange(temp_curve_avg_k, out$plot,
                   hjust = 0.05, font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/temp_curves/combined_avg_params_k.png"  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
+      filename = here("plots/temp_curves/combined_avg_params_k.png")  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
       ,
       width    = 100,
       height   = 100,
@@ -3343,7 +3343,7 @@ ggpubr::ggarrange(temp_curve_avg_k_subclades_loess, out_k_loess$plot,
                   hjust = 0.05, font.label = list(size = 10))
 
 ggsave(
-      filename = "plots/temp_curves/combined_avg_params_k_loess.png"  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
+      filename = here("plots/temp_curves/combined_avg_params_k_loess.png")  #"~/SyncFolder/CA_curto/phys_assays/temp/processed_data/plots/curve_params_dotplot_Subclades.png"
       ,
       width    = 100,
       height   = 100,
