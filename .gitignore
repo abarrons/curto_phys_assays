@@ -10,6 +10,7 @@
 
 # --- Editor / tooling state ---
 .posit/
+AGENTS.md
 
 # --- Generated outputs (regenerated from data/ by the pipeline) ---
 output/

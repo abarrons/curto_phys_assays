@@ -23,6 +23,9 @@ curto_phys_assays/
 │   │   ├── 01_ph_curves_analysis.Rmd     # main pH analysis
 │   │   ├── potassium_phosphate_buffer.R  # buffer-recipe helper
 │   │   └── provenance/                   # how the pH GC_values were generated (needs raw data)
+│   │       ├── gc_helpers.R                       # reusable functions for raw plate analysis
+│   │       ├── report_sources/GC_template.Rmd     # consolidated raw-data template (sources gc_helpers.R)
+│   │       └── run_gc_template.R                  # sets strains/date/paths and renders GC_template.Rmd
 │   ├── temp/
 │   │   ├── 01_temp_performance_curves.Rmd # main temperature analysis
 │   │   └── provenance/                    # how the temp GC_values were generated (needs raw data)
@@ -66,6 +69,12 @@ re-run them, obtain the raw files (available on request) and place them under
 `data-raw/pH/` and `data-raw/temp/` (both git-ignored); paths in those scripts already
 point there.
 
+For new pH plates, prefer the consolidated template: edit
+`R/pH/provenance/run_gc_template.R` (strains, date, raw-file path, and any optional
+corrections) and source it to render `report_sources/GC_template.Rmd`, which draws
+its reusable functions from `provenance/gc_helpers.R`. The older per-run variant
+scripts in `report_sources/` are kept for provenance.
+
 ## Setup
 
 Open `curto_phys_assays.Rproj` in RStudio and install the packages listed under
@@ -104,6 +113,62 @@ flowchart LR
 
 Deleting `output/` and re-running steps 1–4 in order reproduces everything from the
 committed data.
+
+For step-by-step run instructions (including how to render each report and how to
+regenerate the `GC_values_*.txt` inputs from raw plate reads), see [`USAGE.md`](USAGE.md).
+
+## Provenance: regenerating `GC_values_*.txt` from raw plate reads
+
+The committed `GC_values_*.txt` files are already-processed per-run growth values.
+The scripts in each `provenance/` folder document how they were produced from raw
+plate-reader exports. **You only need this to add a new run or reprocess raw data** —
+the standard pipeline above runs entirely from the committed inputs. Raw exports are
+not distributed; obtain them on request and place them under `data-raw/pH/` or
+`data-raw/temp/` (both git-ignored). Paths in the provenance scripts already point there.
+
+### pH
+
+Use the consolidated template: edit the settings in
+`R/pH/provenance/run_gc_template.R` (strain names per plate row, `raw_file`, `date`,
+and optional QC parameters) and source it. It renders
+`R/pH/provenance/report_sources/GC_template.Rmd` (functions from
+`R/pH/provenance/gc_helpers.R`) and writes `data/pH/GC_values_pHassay.<date>.txt`.
+Older per-run `report_sources/*.Rmd` variants are kept for provenance only.
+
+### Temperature
+
+`R/temp/provenance/` holds one script per assay date. Each reads a raw plate-reader
+export from `data-raw/temp/` plus its plate map from `data/temp/`, and writes
+`data/temp/GC_values_Temp_assay.<date>.txt`. They share a common workflow but differ
+in plate layout and a few date-specific corrections:
+
+| Script | Assay date | Raw file (`data-raw/temp/`) | Plate map (`data/temp/`) | Layout | Date-specific handling |
+|--------|-----------|-----------------------------|--------------------------|--------|------------------------|
+| `temp_assay_analysis_011424.Rmd` | 2024-01-14 | `Clade1_temp_aasay.txt` | `plate_map_011424.txt` | 22 cols (11 pairs), rows A–L (88 wells) | blanks averaged at 13 h; 12 h read dropped; residual `NA`s set to 40 |
+| `temp_assay_analysis_022024.Rmd` | 2024-02-20 | `022024_temp_aasay.txt` | `plate_map_022024.txt` | 24 cols (12 pairs), rows A–O (120 wells) | blanks averaged at 0 h; drops T=9 °C @ 45 h and T=4 °C @ 1–9 h |
+| `temp_assay_analysis_031424.Rmd` | 2024-03-14 | `031324_temp_aasay.txt` | `plate_map_031424.txt` | 24 cols, rows A–O | fixes a temperature-label typo (140 → 40 °C) |
+| `temp_assay_analysis_041524.Rmd` | 2024-04-15 | `temp_assay_041524.txt` | `isolates_for_4th_temp_assay_PLATE_layout.txt` | 24 cols, rows A–O | 4th assay; distinct isolate panel |
+
+The shared per-date workflow is:
+
+1. **Read & clean** the raw export with `readLines()`, dropping header/blank lines
+   (`^600`, `^Plate ID`, empties), then parse the tab-separated body into
+   `Plate_ID`, `Well_ID`, `Well`, `Value`.
+2. **Parse conditions** out of `Plate_ID`: temperature (`T<n>`) and timepoint (`<n>h`).
+3. **Map wells → strains** using the plate map, which is laid out in interleaved
+   odd/even column blocks across row groups; repeated strain names get an automatic
+   replicate index.
+4. **Background-correct** by subtracting the per-temperature mean of the `NEG` blank
+   wells (the reference timepoint differs by date — see the table).
+5. **Fit growth curves** per well with `growthcurver::SummarizeGrowth()`
+   (`bg_correct = "none"`, `t_trim = 0`); flag wells that cannot be fit, force
+   `r = k = 0` when `k < 0.086`, and cap `k` at the observed `max.OD` when `k > 1`.
+6. **QC plots**: observed vs. predicted OD per strain × temperature, and temperature
+   performance curves (reaction norms) for growth rate `r` and carrying capacity `k`,
+   colored by subclade (metadata joined from `data/shared/`).
+7. **Export** the stacked per-temperature parameter table (tagged with `date`) to
+   `data/temp/GC_values_Temp_assay.<date>.txt` — the naming the main temperature step
+   picks up by pattern.
 
 ## Dependencies
 
